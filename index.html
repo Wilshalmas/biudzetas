@@ -114,6 +114,8 @@ const ICONS = {
   x: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
   alert: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
   bulb: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>',
+  copy: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  lock: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
 };
 
 const DEFAULT_CATEGORIES = ["Maistas","Transportas","Namai / Sąskaitos","Pramogos","Sveikata","Drabužiai","Kita"];
@@ -181,6 +183,12 @@ let state = {
   budgetStartDay: load("budgetStartDay", 1),
   reportDateMode: "budget",
   searchQuery: "",
+  categoryFilter: null,
+  editingExpenseId: null,
+  editingIncomeId: null,
+  formError: null,
+  appPin: load("appPin", null),
+  appLocked: false,
   reportMode: "month",
   reportYear: new Date().getFullYear(),
   reportCursor: null,
@@ -188,6 +196,7 @@ let state = {
   addSubtab: "expense",
   editingCategory: null,
   chart: null,
+  trendChart: null,
 };
 state.categories.forEach(c => { if (!state.categoryConfig[c]) state.categoryConfig[c] = { type: "expense", essential: true }; });
 state.reportCursor = currentMonthKey();
@@ -211,6 +220,7 @@ function persistAll() {
   save("lastExportAt", state.lastExportAt);
   save("recurringTemplates", state.recurringTemplates);
   save("budgetStartDay", state.budgetStartDay);
+  save("appPin", state.appPin);
 }
 
 function incomeForMonth(monthKey, mode) {
@@ -289,9 +299,16 @@ function statusColorRaw(color) {
 }
 
 function applyTheme() {
-  document.documentElement.classList.toggle("theme-light", state.theme === "light");
+  let effective = state.theme;
+  if (state.theme === "auto") {
+    effective = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  document.documentElement.classList.toggle("theme-light", effective === "light");
 }
 function setTheme(t) { state.theme = t; applyTheme(); persistAll(); render(); }
+if (window.matchMedia) {
+  window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (state.theme === "auto") applyTheme(); });
+}
 
 function catEmoji(c) {
   const cfg = state.categoryConfig[c];
@@ -328,15 +345,18 @@ function renameCategory(oldName, newName) {
   state.budgets[trimmed] = state.budgets[oldName]; delete state.budgets[oldName];
   state.categoryConfig[trimmed] = state.categoryConfig[oldName]; delete state.categoryConfig[oldName];
   state.expenses.forEach(e => { if (e.category === oldName) e.category = trimmed; });
+  state.recurringTemplates.forEach(t => { if (t.category === oldName) t.category = trimmed; });
   state.editingCategory = null;
   persistAll(); render();
 }
 function deleteCategory(name) {
   if (state.categories.length <= 1) return;
+  if (!confirm(`Ištrinti kategoriją „${name}"? Senos jos išlaidos bus perkeltos į kitą kategoriją.`)) return;
   const fallback = state.categories.find(c => c !== name) || "Kita";
   state.categories = state.categories.filter(c => c !== name);
   delete state.budgets[name]; delete state.categoryConfig[name];
   state.expenses.forEach(e => { if (e.category === name) e.category = fallback; });
+  state.recurringTemplates.forEach(t => { if (t.category === name) t.category = fallback; });
   persistAll(); render();
 }
 function toggleCategoryType(name) {
@@ -347,6 +367,14 @@ function toggleCategoryType(name) {
 function toggleEssential(name) {
   if (!state.categoryConfig[name]) state.categoryConfig[name] = { type: "expense" };
   state.categoryConfig[name].essential = !isEssential(name);
+  persistAll(); render();
+}
+function moveCategory(name, delta) {
+  const idx = state.categories.indexOf(name);
+  const newIdx = idx + delta;
+  if (newIdx < 0 || newIdx >= state.categories.length) return;
+  const arr = state.categories;
+  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
   persistAll(); render();
 }
 function updateCategoryGoal(name, field, val) {
@@ -364,6 +392,7 @@ function addRecurringTemplate(amount, category, note, necessity) {
   persistAll(); render();
 }
 function deleteRecurringTemplate(id) {
+  if (!confirm("Ištrinti šią pasikartojančią išlaidą? Jau įrašyti šio mėnesio įrašai liks.")) return;
   state.recurringTemplates = state.recurringTemplates.filter(t => t.id !== id);
   persistAll(); render();
 }
@@ -380,8 +409,29 @@ function applyRecurringTemplates() {
   });
   if (changed) save("expenses", state.expenses);
 }
-function removeExpense(id) { state.expenses = state.expenses.filter(e => e.id !== id); persistAll(); render(); }
-function removeIncome(id) { state.incomes = state.incomes.filter(i => i.id !== id); persistAll(); render(); }
+function removeExpense(id) {
+  if (!confirm("Ištrinti šį įrašą?")) return;
+  state.expenses = state.expenses.filter(e => e.id !== id); persistAll(); render();
+}
+function removeIncome(id) {
+  if (!confirm("Ištrinti šį įrašą?")) return;
+  state.incomes = state.incomes.filter(i => i.id !== id); persistAll(); render();
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  let el = document.getElementById("toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    el.style.cssText = "position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--gold);color:var(--ink);padding:10px 18px;border-radius:20px;font-size:13px;font-weight:600;z-index:999;box-shadow:0 4px 14px rgba(0,0,0,0.3);max-width:85%;text-align:center;";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.style.transition = "opacity .4s"; el.style.opacity = "0"; }, 1800);
+}
 
 function buildTips(monthKey, mode) {
   const cur = monthData(monthKey, mode);
@@ -472,7 +522,7 @@ function buildTips(monthKey, mode) {
   return tips;
 }
 
-function catRow(c, monthKey, d, mode) {
+function catRow(c, monthKey, d, mode, clickable) {
   const spent = d.byCategory[c]||0;
   const isInv = catType(c) === "investment";
   let color, pct, amountLabel;
@@ -488,13 +538,19 @@ function catRow(c, monthKey, d, mode) {
     amountLabel = `€${fmt(spent)}${budget>0?` / €${fmt(budget)}`:""}`;
   }
   const scaled = !isInv && !isEssential(c) && state.baseIncome > 0 && Math.abs(scaleFactorForMonth(monthKey, mode)-1) > 0.02;
-  return `<div class="ledger-row">
+  const isActive = state.categoryFilter === c;
+  const clickAttr = clickable ? `onclick="toggleCategoryFilter('${c}')" style="cursor:pointer;${isActive?'background:rgba(201,162,39,0.08);border-radius:8px;':''}"` : "";
+  return `<div class="ledger-row" ${clickAttr}>
     <div class="cat-line">
       <span class="cat-name"><span>${catEmoji(c)}${c}</span>${isInv?`<span class="cat-tag">Investicija</span>`:""}${scaled?`<span class="scaled-tag">~pritaikyta</span>`:""}</span>
       <span class="tape cat-amount" style="color:${color}">${amountLabel}</span>
     </div>
     <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
   </div>`;
+}
+function toggleCategoryFilter(c) {
+  state.categoryFilter = state.categoryFilter === c ? null : c;
+  render();
 }
 
 function renderOverview() {
@@ -503,7 +559,7 @@ function renderOverview() {
   const pct = d.budgetTotal > 0 ? Math.min(100, (d.spentTotal/d.budgetTotal)*100) : 0;
   const over = d.spentTotal > d.budgetTotal && d.budgetTotal > 0;
 
-  const rows = state.categories.map(c => catRow(c, monthKey, d, "budget")).join("");
+  const rows = state.categories.map(c => catRow(c, monthKey, d, "budget", true)).join("");
 
   const items = [
     ...d.expenses.map(e => ({...e, kind:"expense"})),
@@ -511,10 +567,16 @@ function renderOverview() {
   ].sort((a,b) => b.date.localeCompare(a.date));
 
   const q = state.searchQuery.trim().toLowerCase();
-  const filteredItems = q ? items.filter(item => {
+  let filteredItems = q ? items.filter(item => {
     const hay = item.kind === "expense" ? `${item.category} ${item.note||""}` : `${item.label}`;
     return hay.toLowerCase().includes(q);
   }) : items;
+  if (state.categoryFilter) filteredItems = filteredItems.filter(item => item.kind === "expense" && item.category === state.categoryFilter);
+
+  const filterChip = state.categoryFilter ? `<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--gold);">
+    Filtruojama: ${catEmoji(state.categoryFilter)}${state.categoryFilter}
+    <button onclick="toggleCategoryFilter('${state.categoryFilter}')" class="icon-btn" style="color:var(--gold);padding:0;">${ICONS.x}</button>
+  </div>` : "";
 
   const itemRows = filteredItems.length ? filteredItems.map(item => item.kind === "expense" ? `
     <div class="expense-row ledger-row">
@@ -523,6 +585,8 @@ function renderOverview() {
         <div style="font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.date.split("-").reverse().join(".")}${item.note?` · ${item.note}`:""}</div>
       </div>
       <span class="tape" style="font-size:15px;">€${fmt(item.amount)}</span>
+      <button class="icon-btn" onclick="duplicateExpense('${item.id}')" aria-label="Kopijuoti įrašą">${ICONS.copy}</button>
+      <button class="icon-btn" onclick="editExpense('${item.id}')" aria-label="Redaguoti įrašą">${ICONS.pencil}</button>
       <button class="icon-btn" onclick="removeExpense('${item.id}')" aria-label="Ištrinti įrašą">${ICONS.trash}</button>
     </div>` : `
     <div class="expense-row ledger-row">
@@ -531,9 +595,10 @@ function renderOverview() {
         <div style="font-size:12px;color:var(--faint);">${item.date.split("-").reverse().join(".")}</div>
       </div>
       <span class="tape" style="font-size:15px;color:var(--green);">+€${fmt(item.amount)}</span>
+      <button class="icon-btn" onclick="editIncome('${item.id}')" aria-label="Redaguoti pajamą">${ICONS.pencil}</button>
       <button class="icon-btn" onclick="removeIncome('${item.id}')" aria-label="Ištrinti pajamą">${ICONS.trash}</button>
     </div>`
-  ).join("") : `<div class="empty">${q ? "Pagal paiešką nieko nerasta." : "Šį mėnesį įrašų nėra."}</div>`;
+  ).join("") : `<div class="empty">${q || state.categoryFilter ? "Pagal filtrą nieko nerasta." : "Šį mėnesį įrašų nėra."}</div>`;
 
   return `
   <div class="header">
@@ -561,9 +626,10 @@ function renderOverview() {
       <span><span class="legend-dot" style="background:var(--gold)"></span>dėmesio</span>
       <span><span class="legend-dot" style="background:var(--rust)"></span>viršyta</span>
     </div>
-    <div class="section-label">Pagal kategoriją</div>
+    <div class="section-label">Pagal kategoriją <span style="text-transform:none;letter-spacing:0;color:var(--faint);font-size:11px;">(bakstelėk filtruoti)</span></div>
     ${rows}
     <div class="section-label" style="margin-top:22px;">Šio mėnesio įrašai</div>
+    ${filterChip}
     <input id="search_input" type="text" placeholder="Ieškoti (kategorija, pastaba)..." value="${state.searchQuery}" oninput="state.searchQuery=this.value;state._focusSearch=true;render();" style="margin-bottom:12px;" />
     ${itemRows}
   </div>`;
@@ -651,42 +717,75 @@ function drawChart() {
 
 function renderAdd() {
   const isExpense = state.addSubtab === "expense";
-  const subtabs = `<div class="subtabs">
+  const editingExpense = state.editingExpenseId ? state.expenses.find(e => e.id === state.editingExpenseId) : null;
+  const editingIncome = state.editingIncomeId ? state.incomes.find(i => i.id === state.editingIncomeId) : null;
+  const isEditing = !!(editingExpense || editingIncome);
+
+  const subtabs = isEditing ? "" : `<div class="subtabs">
     <button class="subtab-btn ${isExpense?'active':''}" onclick="state.addSubtab='expense';render();">Išlaidos</button>
     <button class="subtab-btn ${!isExpense?'active':''}" onclick="state.addSubtab='income';render();">Pajamos</button>
   </div>`;
 
-  if (!isExpense) {
-    return `<div class="topbar"><div class="eyebrow">Naujas įrašas</div></div>
-    <div class="tabpanel fade-in">${subtabs}
+  const errorBox = state.formError ? `<div style="background:rgba(217,119,66,0.15);border:1px solid var(--rust);color:var(--rust);border-radius:8px;padding:10px 12px;font-size:13px;">${state.formError}</div>` : "";
+
+  if (!isExpense || editingIncome) {
+    const inc = editingIncome;
+    return `<div class="topbar"><div class="eyebrow">${inc?"Redaguoti pajamas":"Naujas įrašas"}</div></div>
+    <div class="tabpanel fade-in">${subtabs}${errorBox}
       <form class="stack" onsubmit="return submitIncome(event)">
-        <label class="field">Suma (€)<input id="i_amount" type="text" inputmode="decimal" placeholder="0,00" /></label>
-        <label class="field">Pavadinimas<input id="i_label" type="text" placeholder="pvz. Atlyginimas, Avansas, Priedas" list="income_labels" />
+        <label class="field">Suma (€)<input id="i_amount" type="text" inputmode="decimal" placeholder="0,00" value="${inc?String(inc.amount).replace('.', ','):''}" /></label>
+        <label class="field">Pavadinimas<input id="i_label" type="text" placeholder="pvz. Atlyginimas, Avansas, Priedas" list="income_labels" value="${inc?inc.label:''}" />
           <datalist id="income_labels"><option value="Atlyginimas"><option value="Avansas"><option value="Priedas"><option value="Kitos pajamos"></datalist>
         </label>
-        <label class="field">Data<input id="i_date" type="date" value="${new Date().toISOString().slice(0,10)}" /></label>
-        <button type="submit" class="submit-btn" style="background:var(--green);">${ICONS.plus} Įrašyti pajamas</button>
+        <label class="field">Data<input id="i_date" type="date" value="${inc?inc.date:new Date().toISOString().slice(0,10)}" /></label>
+        <div style="display:flex;gap:8px;">
+          <button type="submit" class="submit-btn" style="background:var(--green);">${inc?ICONS.check:ICONS.plus} ${inc?"Išsaugoti":"Įrašyti pajamas"}</button>
+          ${inc?`<button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelEdit()">Atšaukti</button>`:""}
+        </div>
       </form>
     </div>`;
   }
 
-  return `<div class="topbar"><div class="eyebrow">Naujas įrašas</div></div>
-  <div class="tabpanel fade-in">${subtabs}
+  const exp = editingExpense;
+  return `<div class="topbar"><div class="eyebrow">${exp?"Redaguoti išlaidą":"Naujas įrašas"}</div></div>
+  <div class="tabpanel fade-in">${subtabs}${errorBox}
     <form class="stack" onsubmit="return submitAdd(event)">
-      <label class="field">Suma (€)<input id="f_amount" type="text" inputmode="decimal" placeholder="0,00" /></label>
-      <label class="field">Kategorija<select id="f_category">${state.categories.map(c=>`<option value="${c}">${c}${catType(c)==='investment'?' (investicija)':''}</option>`).join("")}</select></label>
-      <label class="field">Data<input id="f_date" type="date" value="${new Date().toISOString().slice(0,10)}" /></label>
-      <label class="field">Pastaba (nebūtina)<input id="f_note" type="text" placeholder="pvz. kavinė su draugais" /></label>
+      <label class="field">Suma (€)<input id="f_amount" type="text" inputmode="decimal" placeholder="0,00" value="${exp?String(exp.amount).replace('.', ','):''}" /></label>
+      <label class="field">Kategorija<select id="f_category">${state.categories.map(c=>`<option value="${c}" ${exp&&exp.category===c?'selected':''}>${c}${catType(c)==='investment'?' (investicija)':''}</option>`).join("")}</select></label>
+      <label class="field">Data<input id="f_date" type="date" value="${exp?exp.date:new Date().toISOString().slice(0,10)}" /></label>
+      <label class="field">Pastaba (nebūtina)<input id="f_note" type="text" placeholder="pvz. kavinė su draugais" value="${exp?exp.note||'':''}" /></label>
       <label class="field">Ar ši išlaida būtina?
         <div class="toggle-row">
-          <button type="button" class="toggle-btn active" id="btn_need" onclick="setNecessity('reikalinga')">Reikalinga</button>
-          <button type="button" class="toggle-btn" id="btn_noneed" onclick="setNecessity('nereikalinga')">Nereikalinga</button>
+          <button type="button" class="toggle-btn ${!exp||exp.necessity==='reikalinga'?'active':''}" id="btn_need" onclick="setNecessity('reikalinga')">Reikalinga</button>
+          <button type="button" class="toggle-btn ${exp&&exp.necessity==='nereikalinga'?'active':''}" id="btn_noneed" onclick="setNecessity('nereikalinga')">Nereikalinga</button>
         </div>
       </label>
-      <input type="hidden" id="f_necessity" value="reikalinga" />
-      <button type="submit" class="submit-btn">${ICONS.plus} Įrašyti išlaidą</button>
+      <input type="hidden" id="f_necessity" value="${exp?exp.necessity:'reikalinga'}" />
+      <div style="display:flex;gap:8px;">
+        <button type="submit" class="submit-btn">${exp?ICONS.check:ICONS.plus} ${exp?"Išsaugoti":"Įrašyti išlaidą"}</button>
+        ${exp?`<button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelEdit()">Atšaukti</button>`:""}
+      </div>
     </form>
   </div>`;
+}
+function cancelEdit() {
+  state.editingExpenseId = null; state.editingIncomeId = null; state.formError = null;
+  state.tab = "overview"; render();
+}
+function editExpense(id) {
+  state.editingExpenseId = id; state.editingIncomeId = null; state.formError = null;
+  state.addSubtab = "expense"; state.tab = "add"; render();
+}
+function editIncome(id) {
+  state.editingIncomeId = id; state.editingExpenseId = null; state.formError = null;
+  state.addSubtab = "income"; state.tab = "add"; render();
+}
+function duplicateExpense(id) {
+  const src = state.expenses.find(e => e.id === id);
+  if (!src) return;
+  state.expenses.unshift({ ...src, id: uid(), date: new Date().toISOString().slice(0,10), recurringId: undefined });
+  persistAll(); render();
+  showToast("Įrašas nukopijuotas su šiandienos data");
 }
 function setNecessity(val) {
   document.getElementById("f_necessity").value = val;
@@ -695,15 +794,29 @@ function setNecessity(val) {
 }
 function submitAdd(ev) {
   ev.preventDefault();
-  const amount = parseFloat(document.getElementById("f_amount").value.replace(",", "."));
-  if (!amount || amount <= 0) return false;
-  const entry = {
-    id: uid(), amount, category: document.getElementById("f_category").value,
-    date: document.getElementById("f_date").value, note: document.getElementById("f_note").value.trim(),
+  const amountRaw = document.getElementById("f_amount").value;
+  const amount = parseFloat(amountRaw.replace(",", "."));
+  if (!amountRaw.trim() || isNaN(amount) || amount <= 0) {
+    state.formError = "Įvesk teisingą sumą (didesnę už 0)."; render(); return false;
+  }
+  const date = document.getElementById("f_date").value;
+  if (!date) { state.formError = "Pasirink datą."; render(); return false; }
+  const fields = {
+    amount, category: document.getElementById("f_category").value,
+    date, note: document.getElementById("f_note").value.trim(),
     necessity: document.getElementById("f_necessity").value,
   };
-  state.expenses.unshift(entry);
-  const entryMonth = budgetMonthKeyForDate(entry.date);
+  if (state.editingExpenseId) {
+    const idx = state.expenses.findIndex(e => e.id === state.editingExpenseId);
+    if (idx !== -1) state.expenses[idx] = { ...state.expenses[idx], ...fields };
+    state.editingExpenseId = null;
+    showToast("Išlaida atnaujinta");
+  } else {
+    state.expenses.unshift({ id: uid(), ...fields });
+    showToast("Išlaida įrašyta");
+  }
+  state.formError = null;
+  const entryMonth = budgetMonthKeyForDate(date);
   state.reportCursor = entryMonth;
   state.tab = entryMonth === currentMonthKey() ? "overview" : "report";
   persistAll(); render();
@@ -711,11 +824,25 @@ function submitAdd(ev) {
 }
 function submitIncome(ev) {
   ev.preventDefault();
-  const amount = parseFloat(document.getElementById("i_amount").value.replace(",", "."));
-  if (!amount || amount <= 0) return false;
-  const entry = { id: uid(), amount, label: document.getElementById("i_label").value.trim() || "Pajamos", date: document.getElementById("i_date").value };
-  state.incomes.unshift(entry);
-  const entryMonth = budgetMonthKeyForDate(entry.date);
+  const amountRaw = document.getElementById("i_amount").value;
+  const amount = parseFloat(amountRaw.replace(",", "."));
+  if (!amountRaw.trim() || isNaN(amount) || amount <= 0) {
+    state.formError = "Įvesk teisingą sumą (didesnę už 0)."; render(); return false;
+  }
+  const date = document.getElementById("i_date").value;
+  if (!date) { state.formError = "Pasirink datą."; render(); return false; }
+  const fields = { amount, label: document.getElementById("i_label").value.trim() || "Pajamos", date };
+  if (state.editingIncomeId) {
+    const idx = state.incomes.findIndex(i => i.id === state.editingIncomeId);
+    if (idx !== -1) state.incomes[idx] = { ...state.incomes[idx], ...fields };
+    state.editingIncomeId = null;
+    showToast("Pajamos atnaujintos");
+  } else {
+    state.incomes.unshift({ id: uid(), ...fields });
+    showToast("Pajamos įrašytos");
+  }
+  state.formError = null;
+  const entryMonth = budgetMonthKeyForDate(date);
   state.reportCursor = entryMonth;
   state.tab = entryMonth === currentMonthKey() ? "overview" : "report";
   persistAll(); render();
@@ -734,14 +861,42 @@ function renderReport() {
 function yearData(year) {
   let incomeTotal = 0, spentTotal = 0, investedTotal = 0;
   const monthly = [];
+  const monthlyFull = [];
   for (let m = 1; m <= 12; m++) {
     const key = `${year}-${String(m).padStart(2,"0")}`;
     const d = monthData(key, "calendar");
     incomeTotal += d.incomeTotal; spentTotal += d.spentTotal; investedTotal += d.investedTotal;
+    monthlyFull.push({ key, incomeTotal: d.incomeTotal, spentTotal: d.spentTotal, investedTotal: d.investedTotal });
     if (d.hasData) monthly.push({ key, incomeTotal: d.incomeTotal, spentTotal: d.spentTotal, investedTotal: d.investedTotal });
   }
   const saved = incomeTotal - spentTotal - investedTotal;
-  return { incomeTotal, spentTotal, investedTotal, saved, monthly };
+  return { incomeTotal, spentTotal, investedTotal, saved, monthly, monthlyFull };
+}
+
+function drawTrendChart(year) {
+  const canvas = document.getElementById("trendChart");
+  if (!canvas || typeof Chart === "undefined") return;
+  const y = yearData(year);
+  if (state.trendChart) { state.trendChart.destroy(); state.trendChart = null; }
+  const labels = y.monthlyFull.map(m => MONTH_NAMES[Number(m.key.split("-")[1])-1].slice(0,3));
+  state.trendChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        { label: "Pajamos", data: y.monthlyFull.map(m=>m.incomeTotal), borderColor: "#6FBF73", backgroundColor: "transparent", tension: 0.3, pointRadius: 2 },
+        { label: "Išleista", data: y.monthlyFull.map(m=>m.spentTotal), borderColor: "#D97742", backgroundColor: "transparent", tension: 0.3, pointRadius: 2 },
+        { label: "Investuota", data: y.monthlyFull.map(m=>m.investedTotal), borderColor: "#6FA3BF", backgroundColor: "transparent", tension: 0.3, pointRadius: 2 },
+      ]
+    },
+    options: {
+      plugins: { legend: { position: "bottom", labels: { color: "#8FA098", boxWidth: 10, font: { size: 10 } } }, tooltip: { callbacks: { label: (ctx) => ` ${ctx.dataset.label}: €${fmt(ctx.raw)}` } } },
+      scales: {
+        x: { ticks: { color: "#8FA098", font: { size: 10 } }, grid: { display: false } },
+        y: { ticks: { color: "#8FA098", font: { size: 10 } }, grid: { color: "rgba(237,234,224,0.08)" } },
+      }
+    }
+  });
 }
 
 function renderYearlyReport() {
@@ -761,6 +916,8 @@ function renderYearlyReport() {
       <div class="stat-card"><div class="stat-label">Metinės investicijos</div><div class="tape stat-value" style="color:var(--blue)">€${fmt(y.investedTotal)}</div></div>
       <div class="stat-card"><div class="stat-label">${y.saved>=0?'Sutaupyta':'Trūkumas'}</div><div class="tape stat-value" style="color:${y.saved>=0?'var(--green)':'var(--rust)'}">€${fmt(Math.abs(y.saved))}</div></div>
     </div>
+    <div class="section-label">Tendencija per metus</div>
+    <div style="height:200px;margin-bottom:20px;"><canvas id="trendChart"></canvas></div>
     <div class="section-label">Mėnesiai su duomenimis</div>
     ${y.monthly.map(m => `<div class="ledger-row" style="display:flex;justify-content:space-between;padding:8px 0;font-size:13px;">
       <span>${monthLabel(m.key)}</span>
@@ -824,7 +981,7 @@ function renderMonthlyReport() {
 }
 
 function renderSettings() {
-  const rows = state.categories.map(c => {
+  const rows = state.categories.map((c, idx) => {
     const isInv = catType(c) === "investment";
     const cfg = state.categoryConfig[c] || {};
     if (state.editingCategory === c) {
@@ -859,6 +1016,10 @@ function renderSettings() {
       ? `<span class="cat-tag" style="margin-right:6px;">Investicija</span><span class="tape" style="font-size:13px;color:var(--faint);">${cfg.goalType==='percent' ? `${cfg.goalPercent||0}% pajamų` : `€${fmt(state.budgets[c]||0)}`}</span>`
       : `<span class="cat-tag" style="${isEssential(c) ? '' : 'border-color:var(--gold);color:var(--gold);'}margin-right:6px;">${isEssential(c) ? 'būtina' : 'lanksti'}</span><span class="tape" style="font-size:13px;color:var(--faint);">€${fmt(state.budgets[c]||0)}</span>`;
     return `<div class="settings-row ledger-row">
+      <div style="display:flex;flex-direction:column;gap:0;flex-shrink:0;">
+        <button class="icon-btn" style="padding:1px;${idx===0?'opacity:.25':''}" ${idx===0?'disabled':''} onclick="moveCategory('${c}',-1)" aria-label="Aukštyn">▲</button>
+        <button class="icon-btn" style="padding:1px;${idx===state.categories.length-1?'opacity:.25':''}" ${idx===state.categories.length-1?'disabled':''} onclick="moveCategory('${c}',1)" aria-label="Žemyn">▼</button>
+      </div>
       <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;">
         <span style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${catEmoji(c)}${c}</span>
         <button class="icon-btn" onclick="state.editingCategory='${c}';render();" aria-label="Redaguoti ${c}">${ICONS.pencil}</button>
@@ -956,15 +1117,33 @@ function renderSettings() {
           <button type="button" onclick="setGaugeStyle('fuel')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.gaugeStyle==='fuel'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.gaugeStyle==='fuel'?'rgba(201,162,39,0.12)':'transparent'};color:${state.gaugeStyle==='fuel'?'var(--gold)':'var(--faint)'};">Rodyklė</button>
         </div>
       </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px;">
         <span style="font-size:12px;color:var(--faint);">Tema</span>
         <div style="display:flex;gap:6px;">
-          <button type="button" onclick="setTheme('dark')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme!=='light'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme!=='light'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme!=='light'?'var(--gold)':'var(--faint)'};">Tamsi</button>
+          <button type="button" onclick="setTheme('dark')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='dark'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='dark'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='dark'?'var(--gold)':'var(--faint)'};">Tamsi</button>
           <button type="button" onclick="setTheme('light')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='light'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='light'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='light'?'var(--gold)':'var(--faint)'};">Šviesi</button>
+          <button type="button" onclick="setTheme('auto')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='auto'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='auto'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='auto'?'var(--gold)':'var(--faint)'};">Auto</button>
         </div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <span style="font-size:12px;color:var(--faint);">Programėlės užraktas (PIN)</span>
+        <button type="button" onclick="${state.appPin ? 'disableAppPin()' : 'promptSetPin()'}" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.appPin?'var(--green)':'rgba(237,234,224,0.15)'};background:${state.appPin?'rgba(111,191,115,0.12)':'transparent'};color:${state.appPin?'var(--green)':'var(--faint)'};">${state.appPin ? 'Įjungtas ✓' : 'Nustatyti'}</button>
       </div>
     </div>
   </div>`;
+}
+function promptSetPin() {
+  const pin = prompt("Sugalvok 4 skaitmenų PIN kodą programėlei atrakinti:");
+  if (!pin) return;
+  if (!/^\d{4}$/.test(pin)) { alert("PIN turi būti iš tiksliai 4 skaitmenų."); return; }
+  state.appPin = pin;
+  persistAll(); render();
+  showToast("PIN kodas nustatytas");
+}
+function disableAppPin() {
+  if (!confirm("Išjungti programėlės užraktą?")) return;
+  state.appPin = null;
+  persistAll(); render();
 }
 function submitAddRecurring(ev) {
   ev.preventDefault();
@@ -1056,8 +1235,37 @@ function submitAddCategory(ev) {
   return false;
 }
 
+function renderLockScreen() {
+  const err = state.pinError ? `<div style="color:var(--rust);font-size:13px;margin-top:10px;">${state.pinError}</div>` : "";
+  return `<div style="min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center;">
+    <div style="color:var(--gold);margin-bottom:16px;">${ICONS.lock}</div>
+    <div class="display" style="font-size:18px;font-weight:600;margin-bottom:16px;">Programėlė užrakinta</div>
+    <form onsubmit="return submitPin(event)" style="width:100%;max-width:220px;">
+      <input id="pin_input" type="password" inputmode="numeric" maxlength="4" placeholder="••••" autofocus style="text-align:center;font-size:22px;letter-spacing:8px;" />
+      <button type="submit" class="submit-btn" style="margin-top:14px;">Atrakinti</button>
+    </form>
+    ${err}
+  </div>`;
+}
+function submitPin(ev) {
+  ev.preventDefault();
+  const val = document.getElementById("pin_input").value;
+  if (val === state.appPin) {
+    state.appLocked = false; state.pinError = null; render();
+  } else {
+    state.pinError = "Neteisingas PIN kodas."; render();
+  }
+  return false;
+}
+
 function render() {
   const app = document.getElementById("app");
+  if (state.appPin && state.appLocked) {
+    app.innerHTML = renderLockScreen();
+    const pi = document.getElementById("pin_input");
+    if (pi) pi.focus();
+    return;
+  }
   let body = "";
   if (state.tab === "overview") body = renderOverview();
   else if (state.tab === "add") body = renderAdd();
@@ -1073,12 +1281,13 @@ function render() {
     </div>`;
 
   if (state.tab === "overview" && state.gaugeStyle !== "fuel") drawChart();
+  if (state.tab === "report" && state.reportMode === "year") drawTrendChart(state.reportYear);
   if (state._focusSearch) {
     const si = document.getElementById("search_input");
     if (si) { si.focus(); const len = si.value.length; si.setSelectionRange(len, len); }
     state._focusSearch = false;
   }
-  if (state.tab === "add" && state.addSubtab === "expense") setNecessity("reikalinga");
+  if (state.tab === "add" && state.addSubtab === "expense" && !state.editingExpenseId) setNecessity("reikalinga");
 }
 function setTab(t) {
   if (t === "report") state.reportCursor = currentMonthKey();
@@ -1088,7 +1297,14 @@ function setTab(t) {
 
 applyTheme();
 applyRecurringTemplates();
+if (state.appPin) state.appLocked = true;
 render();
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && state.appPin) {
+    state.appLocked = true;
+  }
+});
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
