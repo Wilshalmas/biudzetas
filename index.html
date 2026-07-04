@@ -121,13 +121,51 @@ const DEFAULT_BUDGETS = {"Maistas":250,"Transportas":80,"Namai / Sąskaitos":300
 const DEFAULT_CONFIG = {};
 DEFAULT_CATEGORIES.forEach(c => DEFAULT_CONFIG[c] = { type: "expense", essential: true });
 const MONTH_NAMES = ["Sausis","Vasaris","Kovas","Balandis","Gegužė","Birželis","Liepa","Rugpjūtis","Rugsėjis","Spalis","Lapkritis","Gruodis"];
+const MONTH_GENITIVE = ["sausio","vasario","kovo","balandžio","gegužės","birželio","liepos","rugpjūčio","rugsėjo","spalio","lapkričio","gruodžio"];
 
 function load(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (_) { return fallback; }
 }
 function save(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
 
-function currentMonthKey() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; }
+function budgetStartDay() { return Math.min(28, Math.max(1, Number(state.budgetStartDay) || 1)); }
+// Labels a date with the "YYYY-MM" key of the budget-period it falls into
+// (a period runs from budgetStartDay of one calendar month to budgetStartDay-1 of the next).
+function budgetMonthKeyForDate(dateStr) {
+  const startDay = budgetStartDay();
+  if (startDay <= 1) return dateStr.slice(0, 7);
+  const d = new Date(dateStr + "T00:00:00");
+  let y = d.getFullYear(), m = d.getMonth();
+  if (d.getDate() < startDay) { m -= 1; if (m < 0) { m = 11; y -= 1; } }
+  return `${y}-${String(m+1).padStart(2,"0")}`;
+}
+function budgetMonthStartDateStr(monthKey, mode) {
+  const [y, m] = monthKey.split("-").map(Number);
+  if (mode === "calendar" || budgetStartDay() <= 1) return `${y}-${String(m).padStart(2,"0")}-01`;
+  const d = new Date(y, m-1, budgetStartDay());
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function matchesMonth(dateStr, monthKey, mode) {
+  if (mode === "calendar" || budgetStartDay() <= 1) return dateStr.slice(0,7) === monthKey;
+  return budgetMonthKeyForDate(dateStr) === monthKey;
+}
+function budgetMonthLabel(key) {
+  const [y, m] = key.split("-").map(Number);
+  const startDay = budgetStartDay();
+  const startDate = new Date(y, m-1, startDay);
+  const endDate = new Date(y, m, startDay - 1);
+  return `${startDate.getDate()} ${MONTH_GENITIVE[startDate.getMonth()]} – ${endDate.getDate()} ${MONTH_GENITIVE[endDate.getMonth()]}`;
+}
+function periodLabel(key, mode) {
+  if (mode === "calendar" || budgetStartDay() <= 1) return monthLabel(key);
+  return budgetMonthLabel(key);
+}
+
+function currentMonthKey() {
+  const d = new Date();
+  const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  return budgetMonthKeyForDate(dateStr);
+}
 
 let state = {
   expenses: load("expenses", []),
@@ -140,16 +178,19 @@ let state = {
   theme: load("theme", "dark"),
   lastExportAt: load("lastExportAt", null),
   recurringTemplates: load("recurringTemplates", []),
+  budgetStartDay: load("budgetStartDay", 1),
+  reportDateMode: "budget",
   searchQuery: "",
   reportMode: "month",
   reportYear: new Date().getFullYear(),
-  reportCursor: currentMonthKey(),
+  reportCursor: null,
   tab: "overview",
   addSubtab: "expense",
   editingCategory: null,
   chart: null,
 };
 state.categories.forEach(c => { if (!state.categoryConfig[c]) state.categoryConfig[c] = { type: "expense", essential: true }; });
+state.reportCursor = currentMonthKey();
 
 function fmt(n) { return (Math.round(n * 100) / 100).toFixed(2).replace(".", ","); }
 function uid() { return Math.random().toString(36).slice(2, 10); }
@@ -169,26 +210,28 @@ function persistAll() {
   save("theme", state.theme);
   save("lastExportAt", state.lastExportAt);
   save("recurringTemplates", state.recurringTemplates);
+  save("budgetStartDay", state.budgetStartDay);
 }
 
-function incomeForMonth(monthKey) {
-  return state.incomes.filter(i => i.date.slice(0,7) === monthKey).reduce((s,i) => s + Number(i.amount), 0);
+function incomeForMonth(monthKey, mode) {
+  return state.incomes.filter(i => matchesMonth(i.date, monthKey, mode)).reduce((s,i) => s + Number(i.amount), 0);
 }
-function scaleFactorForMonth(monthKey) {
+function scaleFactorForMonth(monthKey, mode) {
   if (!state.baseIncome || state.baseIncome <= 0) return 1;
-  const inc = incomeForMonth(monthKey);
+  const inc = incomeForMonth(monthKey, mode || "budget");
   if (inc <= 0) return 1;
   return inc / state.baseIncome;
 }
-function effectiveBudget(c, monthKey) {
+function effectiveBudget(c, monthKey, mode) {
   const base = Number(state.budgets[c]) || 0;
   if (isEssential(c)) return base;
-  return base * scaleFactorForMonth(monthKey);
+  return base * scaleFactorForMonth(monthKey, mode);
 }
 
-function monthData(monthKey) {
-  const expenses = state.expenses.filter(e => e.date.slice(0,7) === monthKey).sort((a,b) => b.date.localeCompare(a.date));
-  const incomes = state.incomes.filter(i => i.date.slice(0,7) === monthKey);
+function monthData(monthKey, mode) {
+  mode = mode || "budget";
+  const expenses = state.expenses.filter(e => matchesMonth(e.date, monthKey, mode)).sort((a,b) => b.date.localeCompare(a.date));
+  const incomes = state.incomes.filter(i => matchesMonth(i.date, monthKey, mode));
   const byCategory = {};
   state.categories.forEach(c => byCategory[c] = 0);
   expenses.forEach(e => byCategory[e.category] = (byCategory[e.category]||0) + Number(e.amount));
@@ -200,9 +243,9 @@ function monthData(monthKey) {
     else spentTotal += byCategory[c] || 0;
   });
   const expenseCats = state.categories.filter(c => catType(c) !== "investment");
-  const budgetTotal = expenseCats.reduce((s,c) => s + effectiveBudget(c, monthKey), 0);
+  const budgetTotal = expenseCats.reduce((s,c) => s + effectiveBudget(c, monthKey, mode), 0);
   const unnecessarySpent = expenses.filter(e => e.necessity === "nereikalinga").reduce((s,e) => s + Number(e.amount), 0);
-  const overCategories = expenseCats.filter(c => (byCategory[c]||0) > effectiveBudget(c, monthKey) && effectiveBudget(c, monthKey) > 0);
+  const overCategories = expenseCats.filter(c => (byCategory[c]||0) > effectiveBudget(c, monthKey, mode) && effectiveBudget(c, monthKey, mode) > 0);
 
   function investTarget(c) {
     const cfg = state.categoryConfig[c] || {};
@@ -215,14 +258,14 @@ function monthData(monthKey) {
   return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, budgetTotal, unnecessarySpent, overCategories, investTarget, underInvested, hasData };
 }
 
-function monthHasData(monthKey) { const d = monthData(monthKey); return d.hasData; }
-function findMonthWithData(fromKey, delta) {
+function monthHasData(monthKey, mode) { const d = monthData(monthKey, mode); return d.hasData; }
+function findMonthWithData(fromKey, delta, mode) {
   let key = fromKey;
   const cap = currentMonthKey();
   for (let i = 0; i < 36; i++) {
     key = shiftedMonthKey(key, delta);
     if (delta > 0 && key > cap) return null;
-    if (monthHasData(key)) return key;
+    if (monthHasData(key, mode)) return key;
   }
   return null;
 }
@@ -260,7 +303,7 @@ function updateCategoryEmoji(name, val) {
   persistAll(); render();
 }
 function shiftReportMonth(delta) {
-  const jump = findMonthWithData(state.reportCursor, delta);
+  const jump = findMonthWithData(state.reportCursor, delta, state.reportDateMode);
   if (jump) { state.reportCursor = jump; render(); return; }
   const next = shiftedMonthKey(state.reportCursor, delta);
   if (delta > 0 && next > currentMonthKey()) return;
@@ -326,11 +369,12 @@ function deleteRecurringTemplate(id) {
 }
 function applyRecurringTemplates() {
   const monthKey = currentMonthKey();
+  const startDateStr = budgetMonthStartDateStr(monthKey, "budget");
   let changed = false;
   state.recurringTemplates.forEach(t => {
-    const exists = state.expenses.some(e => e.recurringId === t.id && e.date.slice(0,7) === monthKey);
+    const exists = state.expenses.some(e => e.recurringId === t.id && budgetMonthKeyForDate(e.date) === monthKey);
     if (!exists) {
-      state.expenses.unshift({ id: uid(), amount: t.amount, category: t.category, date: monthKey+"-01", note: t.note, necessity: t.necessity, recurringId: t.id });
+      state.expenses.unshift({ id: uid(), amount: t.amount, category: t.category, date: startDateStr, note: t.note, necessity: t.necessity, recurringId: t.id });
       changed = true;
     }
   });
@@ -339,10 +383,10 @@ function applyRecurringTemplates() {
 function removeExpense(id) { state.expenses = state.expenses.filter(e => e.id !== id); persistAll(); render(); }
 function removeIncome(id) { state.incomes = state.incomes.filter(i => i.id !== id); persistAll(); render(); }
 
-function buildTips(monthKey) {
-  const cur = monthData(monthKey);
+function buildTips(monthKey, mode) {
+  const cur = monthData(monthKey, mode);
   const prevKey = shiftedMonthKey(monthKey, -1);
-  const prev = monthData(prevKey);
+  const prev = monthData(prevKey, mode);
   const tips = [];
 
   if (cur.incomeTotal > 0) {
@@ -419,7 +463,7 @@ function buildTips(monthKey) {
   if (streak >= 3) tips.push({ tone:"ok", text:`${streak} mėnesius iš eilės neišeini už biudžeto ribų — puikus pastovumas!` });
 
   if (state.baseIncome > 0) {
-    const factor = scaleFactorForMonth(monthKey);
+    const factor = scaleFactorForMonth(monthKey, mode);
     if (Math.abs(factor - 1) > 0.02) {
       tips.push({ tone:"neutral", text:`Lanksčios kategorijos šį mėnesį pritaikytos ${Math.round(factor*100)}% nuo įprasto dydžio, nes pajamos skyrėsi nuo bazinio atlyginimo.` });
     }
@@ -428,7 +472,7 @@ function buildTips(monthKey) {
   return tips;
 }
 
-function catRow(c, monthKey, d) {
+function catRow(c, monthKey, d, mode) {
   const spent = d.byCategory[c]||0;
   const isInv = catType(c) === "investment";
   let color, pct, amountLabel;
@@ -438,12 +482,12 @@ function catRow(c, monthKey, d) {
     pct = target > 0 ? Math.min(100, (spent/target)*100) : (spent>0?100:0);
     amountLabel = target > 0 ? `€${fmt(spent)} iš €${fmt(target)}` : `€${fmt(spent)}`;
   } else {
-    const budget = effectiveBudget(c, monthKey);
+    const budget = effectiveBudget(c, monthKey, mode);
     color = statusColorExpense(spent, budget);
     pct = budget > 0 ? Math.min(100,(spent/budget)*100) : (spent>0?100:0);
     amountLabel = `€${fmt(spent)}${budget>0?` / €${fmt(budget)}`:""}`;
   }
-  const scaled = !isInv && !isEssential(c) && state.baseIncome > 0 && Math.abs(scaleFactorForMonth(monthKey)-1) > 0.02;
+  const scaled = !isInv && !isEssential(c) && state.baseIncome > 0 && Math.abs(scaleFactorForMonth(monthKey, mode)-1) > 0.02;
   return `<div class="ledger-row">
     <div class="cat-line">
       <span class="cat-name"><span>${catEmoji(c)}${c}</span>${isInv?`<span class="cat-tag">Investicija</span>`:""}${scaled?`<span class="scaled-tag">~pritaikyta</span>`:""}</span>
@@ -455,11 +499,11 @@ function catRow(c, monthKey, d) {
 
 function renderOverview() {
   const monthKey = currentMonthKey();
-  const d = monthData(monthKey);
+  const d = monthData(monthKey, "budget");
   const pct = d.budgetTotal > 0 ? Math.min(100, (d.spentTotal/d.budgetTotal)*100) : 0;
   const over = d.spentTotal > d.budgetTotal && d.budgetTotal > 0;
 
-  const rows = state.categories.map(c => catRow(c, monthKey, d)).join("");
+  const rows = state.categories.map(c => catRow(c, monthKey, d, "budget")).join("");
 
   const items = [
     ...d.expenses.map(e => ({...e, kind:"expense"})),
@@ -494,7 +538,7 @@ function renderOverview() {
   return `
   <div class="header">
     <div class="eyebrow" style="text-align:center;">Sąskaitų knyga</div>
-    <div class="display" style="font-size:20px;font-weight:600;text-align:center;margin-bottom:14px;">${monthLabel(monthKey)}</div>
+    <div class="display" style="font-size:20px;font-weight:600;text-align:center;margin-bottom:14px;">${periodLabel(monthKey, "budget")}</div>
     <div class="total-row">
       <span class="tape total-num" style="color:${over ? 'var(--rust)' : 'var(--paper)'}">€${fmt(d.spentTotal)}</span>
       <span style="color:var(--faint);font-size:14px;">/ €${fmt(d.budgetTotal)} biudžeto</span>
@@ -578,7 +622,7 @@ function drawChart() {
   const canvas = document.getElementById("pieChart");
   if (!canvas || typeof Chart === "undefined") return;
   const monthKey = currentMonthKey();
-  const d = monthData(monthKey);
+  const d = monthData(monthKey, "budget");
   const budget = d.budgetTotal, spent = d.spentTotal;
   const totalEl = document.getElementById("chartTotal");
   if (totalEl) totalEl.textContent = "€" + fmt(spent);
@@ -659,7 +703,7 @@ function submitAdd(ev) {
     necessity: document.getElementById("f_necessity").value,
   };
   state.expenses.unshift(entry);
-  const entryMonth = entry.date.slice(0,7);
+  const entryMonth = budgetMonthKeyForDate(entry.date);
   state.reportCursor = entryMonth;
   state.tab = entryMonth === currentMonthKey() ? "overview" : "report";
   persistAll(); render();
@@ -671,7 +715,7 @@ function submitIncome(ev) {
   if (!amount || amount <= 0) return false;
   const entry = { id: uid(), amount, label: document.getElementById("i_label").value.trim() || "Pajamos", date: document.getElementById("i_date").value };
   state.incomes.unshift(entry);
-  const entryMonth = entry.date.slice(0,7);
+  const entryMonth = budgetMonthKeyForDate(entry.date);
   state.reportCursor = entryMonth;
   state.tab = entryMonth === currentMonthKey() ? "overview" : "report";
   persistAll(); render();
@@ -692,7 +736,7 @@ function yearData(year) {
   const monthly = [];
   for (let m = 1; m <= 12; m++) {
     const key = `${year}-${String(m).padStart(2,"0")}`;
-    const d = monthData(key);
+    const d = monthData(key, "calendar");
     incomeTotal += d.incomeTotal; spentTotal += d.spentTotal; investedTotal += d.investedTotal;
     if (d.hasData) monthly.push({ key, incomeTotal: d.incomeTotal, spentTotal: d.spentTotal, investedTotal: d.investedTotal });
   }
@@ -726,15 +770,21 @@ function renderYearlyReport() {
 }
 
 function renderMonthlyReport() {
+  const mode = budgetStartDay() > 1 ? state.reportDateMode : "calendar";
   const monthKey = state.reportCursor;
-  const d = monthData(monthKey);
+  const d = monthData(monthKey, mode);
   const canGoForward = monthKey < currentMonthKey();
+  const dateModeToggle = budgetStartDay() > 1 ? `
+    <div class="toggle-row" style="margin-bottom:14px;">
+      <button type="button" class="toggle-btn ${mode!=='calendar'?'active blue':''}" onclick="state.reportDateMode='budget';render();">Mano mėnuo</button>
+      <button type="button" class="toggle-btn ${mode==='calendar'?'active blue':''}" onclick="state.reportDateMode='calendar';render();">Kalendorinis</button>
+    </div>` : "";
 
   if (!d.hasData) {
-    return `
+    return `${dateModeToggle}
       <div class="report-month-nav">
         <button class="nav-btn" onclick="shiftReportMonth(-1)" aria-label="Ankstesnis mėnesis">${ICONS.chevronLeft}</button>
-        <div class="display" style="font-size:17px;font-weight:600;">${monthLabel(monthKey)}</div>
+        <div class="display" style="font-size:17px;font-weight:600;">${periodLabel(monthKey, mode)}</div>
         <button class="nav-btn" style="${canGoForward?'':'opacity:.3;'}" ${canGoForward?'':'disabled'} onclick="shiftReportMonth(1)" aria-label="Kitas mėnesis">${ICONS.chevronRight}</button>
       </div>
       <div class="empty" style="text-align:center;padding:40px 0;">Šiam mėnesiui duomenų nėra.</div>`;
@@ -745,13 +795,13 @@ function renderMonthlyReport() {
   const remaining = d.incomeTotal > 0 ? d.incomeTotal - d.spentTotal - d.investedTotal : d.budgetTotal - d.spentTotal;
   const remainingLabel = d.incomeTotal > 0 ? "Likutis po išlaidų ir investicijų" : (remaining>=0 ? "Likutis" : "Viršyta");
   const necessaryPct = d.spentTotal > 0 ? 100 - (d.unnecessarySpent/d.spentTotal)*100 : 100;
-  const tips = buildTips(monthKey);
+  const tips = buildTips(monthKey, mode);
   const colorFor = t => t === "warn" ? "var(--rust)" : t === "ok" ? "var(--green)" : "var(--faint)";
 
-  return `
+  return `${dateModeToggle}
     <div class="report-month-nav">
       <button class="nav-btn" onclick="shiftReportMonth(-1)" aria-label="Ankstesnis mėnesis">${ICONS.chevronLeft}</button>
-      <div class="display" style="font-size:17px;font-weight:600;">${monthLabel(monthKey)}</div>
+      <div class="display" style="font-size:17px;font-weight:600;">${periodLabel(monthKey, mode)}</div>
       <button class="nav-btn" style="${canGoForward?'':'opacity:.3;'}" ${canGoForward?'':'disabled'} onclick="shiftReportMonth(1)" aria-label="Kitas mėnesis">${ICONS.chevronRight}</button>
     </div>
     <div class="stat-grid">
@@ -767,7 +817,7 @@ function renderMonthlyReport() {
     ${tips.map(t => `<div class="tip-card" style="border-left-color:${colorFor(t.tone)}"><div style="display:flex;gap:8px;align-items:flex-start;color:${colorFor(t.tone)}">${ICONS.bulb}<span style="color:var(--paper)">${t.text}</span></div></div>`).join("")}
 
     <div class="section-label" style="margin-top:18px;">Pagal kategoriją</div>
-    ${state.categories.map(c => catRow(c, monthKey, d)).join("")}
+    ${state.categories.map(c => catRow(c, monthKey, d, mode)).join("")}
 
     <div class="section-label" style="margin-top:18px;">Daugiausiai leista</div>
     ${top3.length ? top3.map((c,i)=>`<div class="ledger-row" style="display:flex;justify-content:space-between;padding:8px 0;font-size:14px;"><span>${i+1}. ${c}</span><span class="tape">€${fmt(d.byCategory[c])}</span></div>`).join("") : `<div class="empty">Nėra duomenų šiam mėnesiui.</div>`}`;
@@ -882,6 +932,14 @@ function renderSettings() {
     </div>
     ${exportReminder}
 
+    <div class="section-label" style="margin-top:24px;">Mano biudžeto mėnuo</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+      <span style="font-size:12px;color:var(--faint);">Prasideda</span>
+      <input type="number" min="1" max="28" value="${state.budgetStartDay || 1}" onchange="updateBudgetStartDay(this.value)" style="max-width:70px;" />
+      <span style="font-size:12px;color:var(--faint);">mėnesio dieną</span>
+    </div>
+    <div style="font-size:12px;color:var(--faint);">Jei algą gauni ne 1-ą dieną (pvz. 15-ą), nustatyk tą dieną — Apžvalga rodys tavo asmeninį mėnesį, o Ataskaitoje galėsi rinktis tarp jo ir kalendorinio.</div>
+
     <div class="section-label" style="margin-top:24px;">Pajamų bazė (proporcingam biudžetui)</div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
       <span style="color:var(--faint)">€</span>
@@ -916,6 +974,12 @@ function submitAddRecurring(ev) {
   addRecurringTemplate(amount, category, note, "reikalinga");
   return false;
 }
+function updateBudgetStartDay(val) {
+  const n = Math.min(28, Math.max(1, parseInt(val, 10) || 1));
+  state.budgetStartDay = n;
+  state.reportCursor = currentMonthKey();
+  persistAll(); render();
+}
 function setGaugeStyle(style) { state.gaugeStyle = style; persistAll(); render(); }
 function daysSinceExport() {
   if (!state.lastExportAt) return null;
@@ -926,7 +990,7 @@ function exportData() {
     expenses: state.expenses, incomes: state.incomes, budgets: state.budgets,
     categories: state.categories, categoryConfig: state.categoryConfig,
     baseIncome: state.baseIncome, gaugeStyle: state.gaugeStyle, theme: state.theme,
-    recurringTemplates: state.recurringTemplates, exportedAt: new Date().toISOString(),
+    recurringTemplates: state.recurringTemplates, budgetStartDay: state.budgetStartDay, exportedAt: new Date().toISOString(),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -953,6 +1017,7 @@ function importDataFile(input) {
       if (data.gaugeStyle) state.gaugeStyle = data.gaugeStyle;
       if (data.theme) state.theme = data.theme;
       if (data.recurringTemplates) state.recurringTemplates = data.recurringTemplates;
+      if (typeof data.budgetStartDay === "number") state.budgetStartDay = data.budgetStartDay;
       persistAll();
       applyTheme();
       render();
