@@ -329,13 +329,19 @@ function monthData(monthKey, mode) {
   state.categories.forEach(c => {
     const t = catType(c);
     if (t === "investment") investedTotal += byCategory[c] || 0;
-    else if (t === "loan") loanPaidTotal += byCategory[c] || 0;
-    else spentTotal += byCategory[c] || 0;
+    else {
+      spentTotal += byCategory[c] || 0;
+      if (t === "loan") loanPaidTotal += byCategory[c] || 0;
+    }
   });
   const expenseCats = state.categories.filter(c => catType(c) === "expense");
-  const budgetTotal = expenseCats.reduce((s,c) => s + effectiveBudget(c, monthKey, mode), 0);
+  const loanCats = state.categories.filter(c => catType(c) === "loan");
+  function loanMinPayment(c) { return Number((state.categoryConfig[c]||{}).minPayment) || 0; }
+  const budgetTotal = expenseCats.reduce((s,c) => s + effectiveBudget(c, monthKey, mode), 0)
+    + loanCats.reduce((s,c) => s + loanMinPayment(c), 0);
   const unnecessarySpent = budgetExpenses.filter(e => e.necessity === "nereikalinga").reduce((s,e) => s + Number(e.amount), 0);
   const overCategories = expenseCats.filter(c => (byCategory[c]||0) > effectiveBudget(c, monthKey, mode) && effectiveBudget(c, monthKey, mode) > 0);
+  const underpaidLoans = loanCats.filter(c => loanMinPayment(c) > 0 && (byCategory[c]||0) < loanMinPayment(c));
 
   function investTarget(c) {
     const cfg = state.categoryConfig[c] || {};
@@ -345,7 +351,7 @@ function monthData(monthKey, mode) {
   const underInvested = state.categories.filter(c => catType(c) === "investment" && (byCategory[c]||0) < investTarget(c) * 0.999 && investTarget(c) > 0);
   const hasData = expenses.length > 0 || incomes.length > 0;
 
-  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, loanPaidTotal, budgetTotal, unnecessarySpent, overCategories, investTarget, underInvested, hasData, savingsSpent };
+  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, loanPaidTotal, budgetTotal, unnecessarySpent, overCategories, underpaidLoans, investTarget, underInvested, hasData, savingsSpent, loanMinPayment };
 }
 
 function monthHasData(monthKey, mode) { const d = monthData(monthKey, mode); return d.hasData; }
@@ -372,6 +378,12 @@ function statusColorInvestment(achieved, target) {
   const pct = achieved / target;
   if (pct >= 1) return "var(--green)";
   if (pct >= 0.5) return "var(--gold)";
+  return "var(--rust)";
+}
+function statusColorLoan(paidThisMonth, minPayment) {
+  if (!minPayment || minPayment <= 0) return paidThisMonth > 0 ? "var(--blue)" : "var(--faint)";
+  if (paidThisMonth >= minPayment) return "var(--green)";
+  if (paidThisMonth > 0) return "var(--gold)";
   return "var(--rust)";
 }
 function statusColorRaw(color) {
@@ -408,7 +420,7 @@ function shiftReportMonth(delta) {
   render();
 }
 
-function addCategory(name, type, goalType, goalPercent, essential) {
+function addCategory(name, type, goalType, goalPercent, essential, minPayment) {
   const trimmed = sanitizeCategoryName(name);
   if (!trimmed || state.categories.includes(trimmed)) return;
   state.categories.push(trimmed);
@@ -416,7 +428,7 @@ function addCategory(name, type, goalType, goalPercent, essential) {
   state.categoryConfig[trimmed] = type === "investment"
     ? { type: "investment", goalType: goalType || "amount", goalPercent: Number(goalPercent)||0 }
     : type === "loan"
-    ? { type: "loan", loanTotal: parseFloat(String(goalPercent).replace(",", "."))||0 }
+    ? { type: "loan", loanTotal: parseFloat(String(goalPercent).replace(",", "."))||0, minPayment: parseFloat(String(minPayment).replace(",", "."))||0 }
     : { type: "expense", essential: !!essential };
   persistAll(); render();
 }
@@ -443,7 +455,7 @@ function deleteCategory(name) {
 }
 function setCategoryType(name, type) {
   if (type === "investment") state.categoryConfig[name] = { type: "investment", goalType: "amount", goalPercent: 10 };
-  else if (type === "loan") state.categoryConfig[name] = { type: "loan", loanTotal: state.categoryConfig[name]?.loanTotal || 0 };
+  else if (type === "loan") state.categoryConfig[name] = { type: "loan", loanTotal: state.categoryConfig[name]?.loanTotal || 0, minPayment: state.categoryConfig[name]?.minPayment || 0 };
   else state.categoryConfig[name] = { type: "expense", essential: true };
   persistAll(); render();
 }
@@ -575,40 +587,44 @@ function updateImportMapping(field, val) {
   render();
 }
 function proceedToReview() {
-  const { headers, dataRows } = state.importRaw;
-  const { dateCol, amountCol, descCol, currencyCol, statusCol, allExpense } = state.importMapping;
-  if (dateCol === null || amountCol === null) { alert("Pasirink bent datos ir sumos stulpelius."); return; }
-  const drafts = [];
-  let skippedCurrency = 0, skippedStatus = 0;
-  dataRows.forEach((row) => {
-    if (currencyCol !== null) {
-      const cur = (row[currencyCol] || "").toUpperCase().trim();
-      if (cur && cur !== "EUR") { skippedCurrency++; return; }
-    }
-    if (statusCol !== null) {
-      const st = (row[statusCol] || "").toUpperCase();
-      if (st && /(PENDING|REVERTED|DECLINED|FAILED|LAUKIAMA|ATMEST)/.test(st)) { skippedStatus++; return; }
-    }
-    const rawDate = row[dateCol], rawAmount = row[amountCol], rawDesc = descCol !== null ? row[descCol] : "";
-    const date = parseFlexibleDate(rawDate);
-    const amount = parseFlexibleAmount(rawAmount);
-    if (!date || amount === null || amount === 0) return;
-    const isIncome = !allExpense && amount > 0;
-    const absAmount = Math.abs(amount);
-    const suggested = suggestCategoryForMerchant(rawDesc) || state.categories[0];
-    const h = hashRow(date, absAmount, rawDesc);
-    drafts.push({
-      id: uid(), date, amount: absAmount, rawDesc: rawDesc || "", kind: isIncome ? "income" : "expense",
-      category: suggested, necessity: "reikalinga", include: !state.importedHashes.includes(h), duplicate: state.importedHashes.includes(h), hash: h,
+  try {
+    const { headers, dataRows } = state.importRaw;
+    const { dateCol, amountCol, descCol, currencyCol, statusCol, allExpense } = state.importMapping;
+    if (dateCol === null || amountCol === null) { alert("Pasirink bent datos ir sumos stulpelius."); return; }
+    const drafts = [];
+    let skippedCurrency = 0, skippedStatus = 0;
+    dataRows.forEach((row) => {
+      if (currencyCol !== null) {
+        const cur = (row[currencyCol] || "").toUpperCase().trim();
+        if (cur && cur !== "EUR") { skippedCurrency++; return; }
+      }
+      if (statusCol !== null) {
+        const st = (row[statusCol] || "").toUpperCase();
+        if (st && /(PENDING|REVERTED|DECLINED|FAILED|LAUKIAMA|ATMEST)/.test(st)) { skippedStatus++; return; }
+      }
+      const rawDate = row[dateCol], rawAmount = row[amountCol], rawDesc = descCol !== null ? row[descCol] : "";
+      const date = parseFlexibleDate(rawDate);
+      const amount = parseFlexibleAmount(rawAmount);
+      if (!date || amount === null || amount === 0) return;
+      const isIncome = !allExpense && amount > 0;
+      const absAmount = Math.abs(amount);
+      const suggested = suggestCategoryForMerchant(rawDesc) || state.categories[0];
+      const h = hashRow(date, absAmount, rawDesc);
+      drafts.push({
+        id: uid(), date, amount: absAmount, rawDesc: rawDesc || "", kind: isIncome ? "income" : "expense",
+        category: suggested, necessity: "reikalinga", include: !state.importedHashes.includes(h), duplicate: state.importedHashes.includes(h), hash: h,
+      });
     });
-  });
-  if (drafts.length === 0) { alert("Nepavyko atpažinti nė vieno įrašo. Patikrink stulpelių pasirinkimą."); return; }
-  state.importSkippedInfo = (skippedCurrency || skippedStatus)
-    ? `Praleista: ${skippedCurrency ? `${skippedCurrency} ne-EUR eilučių` : ""}${skippedCurrency && skippedStatus ? ", " : ""}${skippedStatus ? `${skippedStatus} neįvykdytų/laukiančių operacijų` : ""}.`
-    : null;
-  state.importDrafts = drafts;
-  state.importStep = "review";
-  render();
+    if (drafts.length === 0) { alert("Nepavyko atpažinti nė vieno įrašo. Patikrink stulpelių pasirinkimą."); return; }
+    state.importSkippedInfo = (skippedCurrency || skippedStatus)
+      ? `Praleista: ${skippedCurrency ? `${skippedCurrency} ne-EUR eilučių` : ""}${skippedCurrency && skippedStatus ? ", " : ""}${skippedStatus ? `${skippedStatus} neįvykdytų/laukiančių operacijų` : ""}.`
+      : null;
+    state.importDrafts = drafts;
+    state.importStep = "review";
+    render();
+  } catch (err) {
+    alert("Klaida apdorojant failą: " + err.message);
+  }
 }
 function toggleDraftInclude(id) {
   const d = state.importDrafts.find(x => x.id === id);
@@ -808,7 +824,7 @@ function catRow(c, monthKey, d, mode, clickable) {
   const type = catType(c);
   const isInv = type === "investment";
   const isLoan = type === "loan";
-  let color, pct, amountLabel;
+  let color, pct, amountLabel, subLine = "";
   if (isInv) {
     const target = d.investTarget(c);
     color = statusColorInvestment(spent, target);
@@ -816,11 +832,12 @@ function catRow(c, monthKey, d, mode, clickable) {
     amountLabel = target > 0 ? `€${fmt(spent)} iš €${fmt(target)}` : `€${fmt(spent)}`;
   } else if (isLoan) {
     const total = loanTotalFor(c);
-    const paid = allTimePaidForCategory(c);
+    const minPay = d.loanMinPayment(c);
     const remaining = loanRemaining(c);
-    color = "var(--blue)";
-    pct = total > 0 ? Math.min(100, (paid/total)*100) : 0;
-    amountLabel = total > 0 ? `liko €${fmt(remaining)} iš €${fmt(total)}` : `sumokėta €${fmt(paid)}`;
+    color = statusColorLoan(spent, minPay);
+    pct = minPay > 0 ? Math.min(100, (spent/minPay)*100) : (spent>0?100:0);
+    amountLabel = minPay > 0 ? `€${fmt(spent)} / €${fmt(minPay)} įmoka` : `€${fmt(spent)} šį mėn.`;
+    subLine = total > 0 ? `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Bendras likutis: €${fmt(remaining)} iš €${fmt(total)}</div>` : "";
   } else {
     const budget = effectiveBudget(c, monthKey, mode);
     color = statusColorExpense(spent, budget);
@@ -836,6 +853,7 @@ function catRow(c, monthKey, d, mode, clickable) {
       <span class="tape cat-amount" style="color:${color}">${amountLabel}</span>
     </div>
     <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+    ${subLine}
   </div>`;
 }
 function toggleCategoryFilter(c) {
@@ -907,6 +925,7 @@ function renderOverview() {
     ${d.savingsSpent > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:4px;">Iš jų €${fmt(d.savingsSpent)} apmokėta iš santaupų šį mėnesį (neįskaičiuota į biudžetą)</div>` : ""}
     ${state.savingsGoalMin > 0 && state.savingsBalance < state.savingsGoalMin ? `<div class="over-warning">${ICONS.alert}<span>Santaupos (€${fmt(state.savingsBalance)}) žemiau nustatytos ribos (€${fmt(state.savingsGoalMin)})</span></div>` : ""}
     ${d.overCategories.length ? `<div class="over-warning">${ICONS.alert}<span>Viršyta: ${d.overCategories.join(", ")}</span></div>` : ""}
+    ${d.underpaidLoans.length ? `<div class="over-warning">${ICONS.alert}<span>Nesumokėta min. įmoka: ${d.underpaidLoans.join(", ")}</span></div>` : ""}
   </div>
   <div class="tabpanel fade-in">
     ${state.gaugeStyle === "fuel"
@@ -1317,7 +1336,8 @@ function renderSettings() {
             `<div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">tikslas / mėn.</span></div>`
           }
         ` : isLoan ? `
-          <div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.loanTotal ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','loanTotal', this.value)" /><span style="font-size:11px;color:var(--faint);">bendra paskolos suma</span></div>
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.loanTotal ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','loanTotal', this.value)" /><span style="font-size:11px;color:var(--faint);">bendra paskolos suma</span></div>
+          <div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.minPayment ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','minPayment', this.value)" /><span style="font-size:11px;color:var(--faint);">minimali mėn. įmoka</span></div>
           <div style="font-size:11px;color:var(--faint);margin-top:4px;">Sumokėta iki šiol: €${fmt(allTimePaidForCategory(c))} · Liko: €${fmt(loanRemaining(c))}</div>
         ` : `
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">biudžetas / mėn.</span></div>
@@ -1406,7 +1426,9 @@ function renderSettings() {
       </div>
       <div id="newcat_loan_wrap" style="display:none;">
         <label class="field">Bendra paskolos suma (€)<input id="newcat_loantotal" type="text" inputmode="decimal" placeholder="pvz. 5000" /></label>
-        <div style="font-size:11px;color:var(--faint);margin-top:4px;">Kiekvienas įrašas šioje kategorijoje sumažins likusią skolą.</div>
+        <div style="height:10px;"></div>
+        <label class="field">Minimali mėnesio įmoka (€)<input id="newcat_minpayment" type="text" inputmode="decimal" placeholder="pvz. 150" /></label>
+        <div style="font-size:11px;color:var(--faint);margin-top:4px;">Įmoka bus įskaičiuota į mėnesio biudžetą. Sumokėjus bent tiek — juosta žalia, mažiau — raudona.</div>
       </div>
       <button type="submit" class="submit-btn">${ICONS.plus} Pridėti kategoriją</button>
     </form>
@@ -1637,8 +1659,8 @@ function renderImportMapping() {
     </div>
 
     <div style="display:flex;gap:8px;margin-top:20px;">
-      <button class="submit-btn" onclick="proceedToReview()">Toliau</button>
-      <button class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
+      <button type="button" class="submit-btn" onclick="proceedToReview()">Toliau</button>
+      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
     </div>
   </div>`;
 }
@@ -1673,8 +1695,8 @@ function renderImportReview() {
     ${state.importSkippedInfo ? `<div style="font-size:12px;color:var(--gold);margin-bottom:12px;">${state.importSkippedInfo}</div>` : ""}
     ${rows}
     <div style="display:flex;gap:8px;margin-top:16px;">
-      <button class="submit-btn" onclick="confirmImport()">Importuoti pažymėtus (${includedCount})</button>
-      <button class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
+      <button type="button" class="submit-btn" onclick="confirmImport()">Importuoti pažymėtus (${includedCount})</button>
+      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
     </div>
   </div>`;
 }
@@ -1685,9 +1707,10 @@ function submitAddCategory(ev) {
   const goalType = document.getElementById("newcat_goaltype") ? document.getElementById("newcat_goaltype").value : "amount";
   const goalVal = document.getElementById("newcat_goalval") ? document.getElementById("newcat_goalval").value : "0";
   const loanTotal = document.getElementById("newcat_loantotal") ? document.getElementById("newcat_loantotal").value : "0";
+  const minPayment = document.getElementById("newcat_minpayment") ? document.getElementById("newcat_minpayment").value : "0";
   const essential = document.getElementById("newcat_essential") ? document.getElementById("newcat_essential").checked : true;
   if (type === "loan") {
-    addCategory(name, type, null, loanTotal, essential);
+    addCategory(name, type, null, loanTotal, essential, minPayment);
   } else {
     addCategory(name, type, goalType, goalType === "percent" ? goalVal : 0, essential);
     if (type === "investment" && goalType === "amount") { state.budgets[name.trim()] = parseFloat(String(goalVal).replace(",",".")) || 0; persistAll(); }
