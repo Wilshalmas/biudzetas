@@ -125,10 +125,61 @@ DEFAULT_CATEGORIES.forEach(c => DEFAULT_CONFIG[c] = { type: "expense", essential
 const MONTH_NAMES = ["Sausis","Vasaris","Kovas","Balandis","Gegužė","Birželis","Liepa","Rugpjūtis","Rugsėjis","Spalis","Lapkritis","Gruodis"];
 const MONTH_GENITIVE = ["sausio","vasario","kovo","balandžio","gegužės","birželio","liepos","rugpjūčio","rugsėjo","spalio","lapkričio","gruodžio"];
 
+const STARTER_MERCHANTS = [
+  { keywords: ["MAXIMA"], category: "Maistas" },
+  { keywords: ["IKI"], category: "Maistas" },
+  { keywords: ["LIDL"], category: "Maistas" },
+  { keywords: ["RIMI"], category: "Maistas" },
+  { keywords: ["NORFA"], category: "Maistas" },
+  { keywords: ["AIBE"], category: "Maistas" },
+  { keywords: ["CIRCLE K", "CIRCLEK"], category: "Transportas" },
+  { keywords: ["NESTE"], category: "Transportas" },
+  { keywords: ["VIADA"], category: "Transportas" },
+  { keywords: ["ORLEN"], category: "Transportas" },
+  { keywords: ["EMSI"], category: "Transportas" },
+  { keywords: ["BOLT"], category: "Transportas" },
+  { keywords: ["APOTHEKA"], category: "Sveikata" },
+  { keywords: ["EUROVAISTINE"], category: "Sveikata" },
+  { keywords: ["GINTARINE VAISTINE", "GINTARINE"], category: "Sveikata" },
+  { keywords: ["BENU"], category: "Sveikata" },
+  { keywords: ["NETFLIX"], category: "Pramogos" },
+  { keywords: ["SPOTIFY"], category: "Pramogos" },
+  { keywords: ["HBO", "MAX.COM"], category: "Pramogos" },
+  { keywords: ["FORUM CINEMAS", "CINAMON", "MULTIKINO"], category: "Pramogos" },
+  { keywords: ["STEAM", "PLAYSTATION"], category: "Pramogos" },
+  { keywords: ["TELIA"], category: "Namai / Sąskaitos" },
+  { keywords: ["BITE LIETUVA", "UAB BITE"], category: "Namai / Sąskaitos" },
+  { keywords: ["TELE2"], category: "Namai / Sąskaitos" },
+  { keywords: ["IGNITIS"], category: "Namai / Sąskaitos" },
+  { keywords: ["ESO"], category: "Namai / Sąskaitos" },
+  { keywords: ["H&M", "ZARA", "RESERVED", "NEW YORKER", "PULL AND BEAR", "BERSHKA"], category: "Drabužiai" },
+  { keywords: ["DECATHLON"], category: "Kita" },
+  { keywords: ["IKEA", "JYSK", "SENUKAI"], category: "Namai / Sąskaitos" },
+];
+
 function load(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (_) { return fallback; }
 }
 function save(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
+
+function normalizeMerchant(raw) {
+  return (raw || "")
+    .toUpperCase()
+    .replace(/\b(UAB|AB|MB|VSI|VŠĮ|IĮ|ZUAB|IE)\b/g, "")
+    .replace(/[^A-ZĄČĘĖĮŠŲŪŽ0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function suggestCategoryForMerchant(rawDesc) {
+  const norm = normalizeMerchant(rawDesc);
+  if (state.merchantMap[norm]) return state.merchantMap[norm];
+  for (const entry of STARTER_MERCHANTS) {
+    if (entry.keywords.some(k => norm.includes(k))) {
+      return state.categories.includes(entry.category) ? entry.category : null;
+    }
+  }
+  return null;
+}
 
 function budgetStartDay() { return Math.min(28, Math.max(1, Number(state.budgetStartDay) || 1)); }
 // Labels a date with the "YYYY-MM" key of the budget-period it falls into
@@ -181,7 +232,20 @@ let state = {
   lastExportAt: load("lastExportAt", null),
   recurringTemplates: load("recurringTemplates", []),
   budgetStartDay: load("budgetStartDay", 1),
+  savingsBalance: load("savingsBalance", 0),
+  savingsGoalMin: load("savingsGoalMin", 0),
+  savingsLog: load("savingsLog", []),
   reportDateMode: "budget",
+  merchantMap: load("merchantMap", {}),
+  importedHashes: load("importedHashes", []),
+  importStep: null,
+  importRaw: null,
+  importMapping: { dateCol: null, amountCol: null, descCol: null, allExpense: false },
+  importDrafts: [],
+  importFile: null,
+  importSkippedInfo: null,
+  showHelp: false,
+  editingRecurringId: null,
   searchQuery: "",
   categoryFilter: null,
   editingExpenseId: null,
@@ -202,6 +266,12 @@ state.categories.forEach(c => { if (!state.categoryConfig[c]) state.categoryConf
 state.reportCursor = currentMonthKey();
 
 function fmt(n) { return (Math.round(n * 100) / 100).toFixed(2).replace(".", ","); }
+function escapeHtml(str) {
+  return String(str ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+function sanitizeCategoryName(str) {
+  return String(str ?? "").replace(/[<>"'\\]/g, "").trim();
+}
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function monthLabel(key) { const [y,m] = key.split("-").map(Number); return `${MONTH_NAMES[m-1]} ${y}`; }
 function shiftedMonthKey(key, delta) { const [y,m] = key.split("-").map(Number); const d = new Date(y, m-1+delta, 1); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; }
@@ -221,6 +291,11 @@ function persistAll() {
   save("recurringTemplates", state.recurringTemplates);
   save("budgetStartDay", state.budgetStartDay);
   save("appPin", state.appPin);
+  save("savingsBalance", state.savingsBalance);
+  save("savingsGoalMin", state.savingsGoalMin);
+  save("savingsLog", state.savingsLog);
+  save("merchantMap", state.merchantMap);
+  save("importedHashes", state.importedHashes);
 }
 
 function incomeForMonth(monthKey, mode) {
@@ -242,19 +317,24 @@ function monthData(monthKey, mode) {
   mode = mode || "budget";
   const expenses = state.expenses.filter(e => matchesMonth(e.date, monthKey, mode)).sort((a,b) => b.date.localeCompare(a.date));
   const incomes = state.incomes.filter(i => matchesMonth(i.date, monthKey, mode));
+  const budgetExpenses = expenses.filter(e => !e.fromSavings);
+  const savingsExpenses = expenses.filter(e => e.fromSavings);
+  const savingsSpent = savingsExpenses.reduce((s,e) => s + Number(e.amount), 0);
   const byCategory = {};
   state.categories.forEach(c => byCategory[c] = 0);
-  expenses.forEach(e => byCategory[e.category] = (byCategory[e.category]||0) + Number(e.amount));
+  budgetExpenses.forEach(e => byCategory[e.category] = (byCategory[e.category]||0) + Number(e.amount));
 
   const incomeTotal = incomes.reduce((s,i) => s + Number(i.amount), 0);
-  let spentTotal = 0, investedTotal = 0;
+  let spentTotal = 0, investedTotal = 0, loanPaidTotal = 0;
   state.categories.forEach(c => {
-    if (catType(c) === "investment") investedTotal += byCategory[c] || 0;
+    const t = catType(c);
+    if (t === "investment") investedTotal += byCategory[c] || 0;
+    else if (t === "loan") loanPaidTotal += byCategory[c] || 0;
     else spentTotal += byCategory[c] || 0;
   });
-  const expenseCats = state.categories.filter(c => catType(c) !== "investment");
+  const expenseCats = state.categories.filter(c => catType(c) === "expense");
   const budgetTotal = expenseCats.reduce((s,c) => s + effectiveBudget(c, monthKey, mode), 0);
-  const unnecessarySpent = expenses.filter(e => e.necessity === "nereikalinga").reduce((s,e) => s + Number(e.amount), 0);
+  const unnecessarySpent = budgetExpenses.filter(e => e.necessity === "nereikalinga").reduce((s,e) => s + Number(e.amount), 0);
   const overCategories = expenseCats.filter(c => (byCategory[c]||0) > effectiveBudget(c, monthKey, mode) && effectiveBudget(c, monthKey, mode) > 0);
 
   function investTarget(c) {
@@ -265,7 +345,7 @@ function monthData(monthKey, mode) {
   const underInvested = state.categories.filter(c => catType(c) === "investment" && (byCategory[c]||0) < investTarget(c) * 0.999 && investTarget(c) > 0);
   const hasData = expenses.length > 0 || incomes.length > 0;
 
-  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, budgetTotal, unnecessarySpent, overCategories, investTarget, underInvested, hasData };
+  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, loanPaidTotal, budgetTotal, unnecessarySpent, overCategories, investTarget, underInvested, hasData, savingsSpent };
 }
 
 function monthHasData(monthKey, mode) { const d = monthData(monthKey, mode); return d.hasData; }
@@ -329,17 +409,19 @@ function shiftReportMonth(delta) {
 }
 
 function addCategory(name, type, goalType, goalPercent, essential) {
-  const trimmed = name.trim();
+  const trimmed = sanitizeCategoryName(name);
   if (!trimmed || state.categories.includes(trimmed)) return;
   state.categories.push(trimmed);
   state.budgets[trimmed] = 0;
   state.categoryConfig[trimmed] = type === "investment"
     ? { type: "investment", goalType: goalType || "amount", goalPercent: Number(goalPercent)||0 }
+    : type === "loan"
+    ? { type: "loan", loanTotal: parseFloat(String(goalPercent).replace(",", "."))||0 }
     : { type: "expense", essential: !!essential };
   persistAll(); render();
 }
 function renameCategory(oldName, newName) {
-  const trimmed = newName.trim();
+  const trimmed = sanitizeCategoryName(newName);
   if (!trimmed || trimmed === oldName || state.categories.includes(trimmed)) { state.editingCategory = null; render(); return; }
   state.categories = state.categories.map(c => c === oldName ? trimmed : c);
   state.budgets[trimmed] = state.budgets[oldName]; delete state.budgets[oldName];
@@ -359,9 +441,10 @@ function deleteCategory(name) {
   state.recurringTemplates.forEach(t => { if (t.category === name) t.category = fallback; });
   persistAll(); render();
 }
-function toggleCategoryType(name) {
-  const cur = catType(name);
-  state.categoryConfig[name] = cur === "investment" ? { type: "expense", essential: true } : { type: "investment", goalType: "amount", goalPercent: 10 };
+function setCategoryType(name, type) {
+  if (type === "investment") state.categoryConfig[name] = { type: "investment", goalType: "amount", goalPercent: 10 };
+  else if (type === "loan") state.categoryConfig[name] = { type: "loan", loanTotal: state.categoryConfig[name]?.loanTotal || 0 };
+  else state.categoryConfig[name] = { type: "expense", essential: true };
   persistAll(); render();
 }
 function toggleEssential(name) {
@@ -379,11 +462,189 @@ function moveCategory(name, delta) {
 }
 function updateCategoryGoal(name, field, val) {
   if (!state.categoryConfig[name]) state.categoryConfig[name] = { type: "investment" };
-  state.categoryConfig[name][field] = val;
+  state.categoryConfig[name][field] = (field === "goalPercent" || field === "loanTotal") ? (parseFloat(String(val).replace(",",".")) || 0) : val;
   persistAll(); render();
 }
 function updateBudget(c, val) { state.budgets[c] = val; persistAll(); }
 function updateBaseIncome(val) { state.baseIncome = parseFloat(String(val).replace(",",".")) || 0; persistAll(); render(); }
+function updateSavingsBalance(val) {
+  const newVal = parseFloat(String(val).replace(",",".")) || 0;
+  if (newVal !== state.savingsBalance) {
+    state.savingsLog.unshift({ date: new Date().toISOString().slice(0,10), from: state.savingsBalance, to: newVal });
+    state.savingsLog = state.savingsLog.slice(0, 20);
+  }
+  state.savingsBalance = newVal;
+  persistAll(); render();
+}
+function updateSavingsGoalMin(val) { state.savingsGoalMin = parseFloat(String(val).replace(",",".")) || 0; persistAll(); render(); }
+
+// ---- CSV import ----
+function parseCSV(text) {
+  const firstLine = text.split("\n")[0];
+  const delim = (firstLine.split(";").length > firstLine.split(",").length) ? ";" : (firstLine.split("\t").length > firstLine.split(",").length ? "\t" : ",");
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  const rows = lines.map(line => {
+    const out = []; let cur = ""; let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQuotes = !inQuotes; continue; }
+      if (ch === delim && !inQuotes) { out.push(cur); cur = ""; continue; }
+      cur += ch;
+    }
+    out.push(cur);
+    return out.map(s => s.trim().replace(/^"|"$/g, ""));
+  });
+  return rows;
+}
+function looksMojibake(text) {
+  // Windows-1257/ISO-8859-13 read as UTF-8 (or vice versa) produces replacement chars or odd sequences
+  return /\uFFFD/.test(text) || /[ÃÂ][€ž©®°]/.test(text);
+}
+function findHeaderRowIndex(rows) {
+  // Some LT bank exports have a few summary/metadata lines before the real header.
+  // Heuristic: the header row is the first row with >=3 columns where a later row of similar column count follows.
+  for (let i = 0; i < Math.min(rows.length - 1, 15); i++) {
+    if (rows[i].length >= 3 && rows[i+1] && rows[i+1].length === rows[i].length) return i;
+  }
+  return 0;
+}
+function guessColumn(headers, keywords, excludeKeywords) {
+  const lower = headers.map(h => h.toLowerCase());
+  for (let i = 0; i < lower.length; i++) {
+    if (excludeKeywords && excludeKeywords.some(k => lower[i].includes(k))) continue;
+    if (keywords.some(k => lower[i].includes(k))) return i;
+  }
+  return null;
+}
+function parseFlexibleDate(raw) {
+  const s = (raw || "").trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
+  return null;
+}
+function parseFlexibleAmount(raw) {
+  let s = (raw || "").trim().replace(/\s/g, "").replace(/€/g, "");
+  if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (s.includes(",")) s = s.replace(",", ".");
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+function hashRow(date, amount, desc) { return `${date}|${amount}|${(desc||"").slice(0,40)}`; }
+
+function processCsvText(text) {
+  const allRows = parseCSV(text);
+  const headerIdx = findHeaderRowIndex(allRows);
+  const headers = allRows[headerIdx];
+  const dataRows = allRows.slice(headerIdx + 1);
+  if (dataRows.length === 0) { alert("Faile nerasta duomenų eilučių."); return; }
+  state.importRaw = { headers, dataRows, skippedRows: headerIdx };
+  state.importMapping = {
+    dateCol: guessColumn(headers, ["data", "date"]),
+    amountCol: guessColumn(headers, ["suma", "amount", "value"], ["likutis", "balance"]),
+    descCol: guessColumn(headers, ["gavėjas", "gavejas", "aprašymas", "aprasymas", "description", "payee", "detalės", "detales", "mokėjimo paskirtis", "paskirtis"]),
+    currencyCol: guessColumn(headers, ["valiuta", "currency", "ccy"]),
+    statusCol: guessColumn(headers, ["state", "statusas", "būsena", "busena"]),
+    allExpense: false,
+  };
+  state.importStep = "mapping";
+  render();
+}
+function handleCsvFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  state.importFile = file;
+  const reader = new FileReader();
+  reader.onload = (e) => processCsvText(e.target.result);
+  reader.readAsText(file, "UTF-8");
+}
+function reReadWithEncoding(encoding) {
+  if (!state.importFile) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const decoder = new TextDecoder(encoding);
+    const text = decoder.decode(new Uint8Array(e.target.result));
+    processCsvText(text);
+  };
+  reader.readAsArrayBuffer(state.importFile);
+}
+function updateImportMapping(field, val) {
+  const numericFields = ["dateCol","amountCol","descCol","currencyCol","statusCol"];
+  state.importMapping[field] = field === "allExpense" ? val : (numericFields.includes(field) ? (val === "" ? null : Number(val)) : val);
+  render();
+}
+function proceedToReview() {
+  const { headers, dataRows } = state.importRaw;
+  const { dateCol, amountCol, descCol, currencyCol, statusCol, allExpense } = state.importMapping;
+  if (dateCol === null || amountCol === null) { alert("Pasirink bent datos ir sumos stulpelius."); return; }
+  const drafts = [];
+  let skippedCurrency = 0, skippedStatus = 0;
+  dataRows.forEach((row) => {
+    if (currencyCol !== null) {
+      const cur = (row[currencyCol] || "").toUpperCase().trim();
+      if (cur && cur !== "EUR") { skippedCurrency++; return; }
+    }
+    if (statusCol !== null) {
+      const st = (row[statusCol] || "").toUpperCase();
+      if (st && /(PENDING|REVERTED|DECLINED|FAILED|LAUKIAMA|ATMEST)/.test(st)) { skippedStatus++; return; }
+    }
+    const rawDate = row[dateCol], rawAmount = row[amountCol], rawDesc = descCol !== null ? row[descCol] : "";
+    const date = parseFlexibleDate(rawDate);
+    const amount = parseFlexibleAmount(rawAmount);
+    if (!date || amount === null || amount === 0) return;
+    const isIncome = !allExpense && amount > 0;
+    const absAmount = Math.abs(amount);
+    const suggested = suggestCategoryForMerchant(rawDesc) || state.categories[0];
+    const h = hashRow(date, absAmount, rawDesc);
+    drafts.push({
+      id: uid(), date, amount: absAmount, rawDesc: rawDesc || "", kind: isIncome ? "income" : "expense",
+      category: suggested, necessity: "reikalinga", include: !state.importedHashes.includes(h), duplicate: state.importedHashes.includes(h), hash: h,
+    });
+  });
+  if (drafts.length === 0) { alert("Nepavyko atpažinti nė vieno įrašo. Patikrink stulpelių pasirinkimą."); return; }
+  state.importSkippedInfo = (skippedCurrency || skippedStatus)
+    ? `Praleista: ${skippedCurrency ? `${skippedCurrency} ne-EUR eilučių` : ""}${skippedCurrency && skippedStatus ? ", " : ""}${skippedStatus ? `${skippedStatus} neįvykdytų/laukiančių operacijų` : ""}.`
+    : null;
+  state.importDrafts = drafts;
+  state.importStep = "review";
+  render();
+}
+function toggleDraftInclude(id) {
+  const d = state.importDrafts.find(x => x.id === id);
+  if (d) d.include = !d.include;
+  render();
+}
+function updateDraftCategory(id, cat) {
+  const d = state.importDrafts.find(x => x.id === id);
+  if (d) d.category = cat;
+}
+function updateDraftKind(id, kind) {
+  const d = state.importDrafts.find(x => x.id === id);
+  if (d) d.kind = kind;
+  render();
+}
+function confirmImport() {
+  const included = state.importDrafts.filter(d => d.include);
+  if (included.length === 0) { alert("Nepažymėtas nė vienas įrašas."); return; }
+  included.forEach(d => {
+    if (d.kind === "income") {
+      state.incomes.unshift({ id: uid(), amount: d.amount, label: d.rawDesc.slice(0,40) || "Pajamos", date: d.date });
+    } else {
+      state.expenses.unshift({ id: uid(), amount: d.amount, category: d.category, date: d.date, note: d.rawDesc.slice(0,60), necessity: d.necessity });
+      const norm = normalizeMerchant(d.rawDesc);
+      if (norm) state.merchantMap[norm] = d.category;
+    }
+    state.importedHashes.push(d.hash);
+  });
+  state.importStep = null; state.importRaw = null; state.importDrafts = []; state.importFile = null; state.importSkippedInfo = null;
+  persistAll(); render();
+  showToast(`Importuota įrašų: ${included.length}`);
+}
+function cancelImport() {
+  state.importStep = null; state.importRaw = null; state.importDrafts = []; state.importFile = null; state.importSkippedInfo = null;
+  render();
+}
 function addRecurringTemplate(amount, category, note, necessity) {
   const amt = parseFloat(String(amount).replace(",", "."));
   if (!amt || amt <= 0) return;
@@ -395,6 +656,18 @@ function deleteRecurringTemplate(id) {
   if (!confirm("Ištrinti šią pasikartojančią išlaidą? Jau įrašyti šio mėnesio įrašai liks.")) return;
   state.recurringTemplates = state.recurringTemplates.filter(t => t.id !== id);
   persistAll(); render();
+}
+function confirmEditRecurring(id) {
+  const t = state.recurringTemplates.find(x => x.id === id);
+  if (!t) return;
+  const amount = parseFloat(document.getElementById("rec_edit_amount").value.replace(",", "."));
+  if (!amount || amount <= 0) { alert("Įvesk teisingą sumą."); return; }
+  t.amount = amount;
+  t.category = document.getElementById("rec_edit_category").value;
+  t.note = document.getElementById("rec_edit_note").value.trim();
+  state.editingRecurringId = null;
+  persistAll(); render();
+  showToast("Pasikartojanti išlaida atnaujinta");
 }
 function applyRecurringTemplates() {
   const monthKey = currentMonthKey();
@@ -411,6 +684,8 @@ function applyRecurringTemplates() {
 }
 function removeExpense(id) {
   if (!confirm("Ištrinti šį įrašą?")) return;
+  const e = state.expenses.find(x => x.id === id);
+  if (e && e.fromSavings) state.savingsBalance += Number(e.amount);
   state.expenses = state.expenses.filter(e => e.id !== id); persistAll(); render();
 }
 function removeIncome(id) {
@@ -473,7 +748,7 @@ function buildTips(monthKey, mode) {
 
   if (cur.expenses.length > 0) {
     const biggest = [...cur.expenses].sort((a,b) => b.amount - a.amount)[0];
-    tips.push({ tone:"neutral", text:`Didžiausia šio mėnesio išlaida: €${fmt(biggest.amount)} (${biggest.category}).` });
+    tips.push({ tone:"neutral", text:`Didžiausia šio mėnesio išlaida: €${fmt(biggest.amount)} (${escapeHtml(biggest.category)}).` });
   }
 
   if (monthKey === currentMonthKey() && cur.budgetTotal > 0) {
@@ -522,27 +797,42 @@ function buildTips(monthKey, mode) {
   return tips;
 }
 
+function allTimePaidForCategory(c) {
+  return state.expenses.filter(e => e.category === c).reduce((s,e) => s + Number(e.amount), 0);
+}
+function loanTotalFor(c) { return (state.categoryConfig[c] && Number(state.categoryConfig[c].loanTotal)) || 0; }
+function loanRemaining(c) { return Math.max(0, loanTotalFor(c) - allTimePaidForCategory(c)); }
+
 function catRow(c, monthKey, d, mode, clickable) {
   const spent = d.byCategory[c]||0;
-  const isInv = catType(c) === "investment";
+  const type = catType(c);
+  const isInv = type === "investment";
+  const isLoan = type === "loan";
   let color, pct, amountLabel;
   if (isInv) {
     const target = d.investTarget(c);
     color = statusColorInvestment(spent, target);
     pct = target > 0 ? Math.min(100, (spent/target)*100) : (spent>0?100:0);
     amountLabel = target > 0 ? `€${fmt(spent)} iš €${fmt(target)}` : `€${fmt(spent)}`;
+  } else if (isLoan) {
+    const total = loanTotalFor(c);
+    const paid = allTimePaidForCategory(c);
+    const remaining = loanRemaining(c);
+    color = "var(--blue)";
+    pct = total > 0 ? Math.min(100, (paid/total)*100) : 0;
+    amountLabel = total > 0 ? `liko €${fmt(remaining)} iš €${fmt(total)}` : `sumokėta €${fmt(paid)}`;
   } else {
     const budget = effectiveBudget(c, monthKey, mode);
     color = statusColorExpense(spent, budget);
     pct = budget > 0 ? Math.min(100,(spent/budget)*100) : (spent>0?100:0);
     amountLabel = `€${fmt(spent)}${budget>0?` / €${fmt(budget)}`:""}`;
   }
-  const scaled = !isInv && !isEssential(c) && state.baseIncome > 0 && Math.abs(scaleFactorForMonth(monthKey, mode)-1) > 0.02;
+  const scaled = !isInv && !isLoan && !isEssential(c) && state.baseIncome > 0 && Math.abs(scaleFactorForMonth(monthKey, mode)-1) > 0.02;
   const isActive = state.categoryFilter === c;
   const clickAttr = clickable ? `onclick="toggleCategoryFilter('${c}')" style="cursor:pointer;${isActive?'background:rgba(201,162,39,0.08);border-radius:8px;':''}"` : "";
   return `<div class="ledger-row" ${clickAttr}>
     <div class="cat-line">
-      <span class="cat-name"><span>${catEmoji(c)}${c}</span>${isInv?`<span class="cat-tag">Investicija</span>`:""}${scaled?`<span class="scaled-tag">~pritaikyta</span>`:""}</span>
+      <span class="cat-name"><span>${catEmoji(c)}${c}</span>${isInv?`<span class="cat-tag">Investicija</span>`:""}${isLoan?`<span class="cat-tag" style="color:var(--blue);border-color:var(--blue);">Paskola</span>`:""}${scaled?`<span class="scaled-tag">~pritaikyta</span>`:""}</span>
       <span class="tape cat-amount" style="color:${color}">${amountLabel}</span>
     </div>
     <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
@@ -581,8 +871,8 @@ function renderOverview() {
   const itemRows = filteredItems.length ? filteredItems.map(item => item.kind === "expense" ? `
     <div class="expense-row ledger-row">
       <div style="flex:1;min-width:0;">
-        <div style="font-size:14px;">${item.category}${item.necessity==="nereikalinga" ? `<span class="badge">nereikalinga</span>`:""}</div>
-        <div style="font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.date.split("-").reverse().join(".")}${item.note?` · ${item.note}`:""}</div>
+        <div style="font-size:14px;">${escapeHtml(item.category)}${item.necessity==="nereikalinga" ? `<span class="badge">nereikalinga</span>`:""}${item.fromSavings ? `<span class="badge" style="color:var(--gold);border-color:var(--gold);">santaupos</span>`:""}</div>
+        <div style="font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.date.split("-").reverse().join(".")}${item.note?` · ${escapeHtml(item.note)}`:""}</div>
       </div>
       <span class="tape" style="font-size:15px;">€${fmt(item.amount)}</span>
       <button class="icon-btn" onclick="duplicateExpense('${item.id}')" aria-label="Kopijuoti įrašą">${ICONS.copy}</button>
@@ -591,7 +881,7 @@ function renderOverview() {
     </div>` : `
     <div class="expense-row ledger-row">
       <div style="flex:1;min-width:0;">
-        <div style="font-size:14px;color:var(--green);">↑ ${item.label}</div>
+        <div style="font-size:14px;color:var(--green);">↑ ${escapeHtml(item.label)}</div>
         <div style="font-size:12px;color:var(--faint);">${item.date.split("-").reverse().join(".")}</div>
       </div>
       <span class="tape" style="font-size:15px;color:var(--green);">+€${fmt(item.amount)}</span>
@@ -612,7 +902,10 @@ function renderOverview() {
     <div class="income-line">
       <span>Pajamos: <b>€${fmt(d.incomeTotal)}</b></span>
       <span>Investuota: <b style="color:var(--blue)">€${fmt(d.investedTotal)}</b></span>
+      <span>Santaupos: <b style="color:${state.savingsBalance<0?'var(--rust)':'var(--gold)'}">€${fmt(state.savingsBalance)}</b></span>
     </div>
+    ${d.savingsSpent > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:4px;">Iš jų €${fmt(d.savingsSpent)} apmokėta iš santaupų šį mėnesį (neįskaičiuota į biudžetą)</div>` : ""}
+    ${state.savingsGoalMin > 0 && state.savingsBalance < state.savingsGoalMin ? `<div class="over-warning">${ICONS.alert}<span>Santaupos (€${fmt(state.savingsBalance)}) žemiau nustatytos ribos (€${fmt(state.savingsGoalMin)})</span></div>` : ""}
     ${d.overCategories.length ? `<div class="over-warning">${ICONS.alert}<span>Viršyta: ${d.overCategories.join(", ")}</span></div>` : ""}
   </div>
   <div class="tabpanel fade-in">
@@ -734,7 +1027,7 @@ function renderAdd() {
     <div class="tabpanel fade-in">${subtabs}${errorBox}
       <form class="stack" onsubmit="return submitIncome(event)">
         <label class="field">Suma (€)<input id="i_amount" type="text" inputmode="decimal" placeholder="0,00" value="${inc?String(inc.amount).replace('.', ','):''}" /></label>
-        <label class="field">Pavadinimas<input id="i_label" type="text" placeholder="pvz. Atlyginimas, Avansas, Priedas" list="income_labels" value="${inc?inc.label:''}" />
+        <label class="field">Pavadinimas<input id="i_label" type="text" placeholder="pvz. Atlyginimas, Avansas, Priedas" list="income_labels" value="${inc?escapeHtml(inc.label):''}" /></label>
           <datalist id="income_labels"><option value="Atlyginimas"><option value="Avansas"><option value="Priedas"><option value="Kitos pajamos"></datalist>
         </label>
         <label class="field">Data<input id="i_date" type="date" value="${inc?inc.date:new Date().toISOString().slice(0,10)}" /></label>
@@ -753,7 +1046,7 @@ function renderAdd() {
       <label class="field">Suma (€)<input id="f_amount" type="text" inputmode="decimal" placeholder="0,00" value="${exp?String(exp.amount).replace('.', ','):''}" /></label>
       <label class="field">Kategorija<select id="f_category">${state.categories.map(c=>`<option value="${c}" ${exp&&exp.category===c?'selected':''}>${c}${catType(c)==='investment'?' (investicija)':''}</option>`).join("")}</select></label>
       <label class="field">Data<input id="f_date" type="date" value="${exp?exp.date:new Date().toISOString().slice(0,10)}" /></label>
-      <label class="field">Pastaba (nebūtina)<input id="f_note" type="text" placeholder="pvz. kavinė su draugais" value="${exp?exp.note||'':''}" /></label>
+      <label class="field">Pastaba (nebūtina)<input id="f_note" type="text" placeholder="pvz. kavinė su draugais" value="${exp?escapeHtml(exp.note||''):''}" /></label>
       <label class="field">Ar ši išlaida būtina?
         <div class="toggle-row">
           <button type="button" class="toggle-btn ${!exp||exp.necessity==='reikalinga'?'active':''}" id="btn_need" onclick="setNecessity('reikalinga')">Reikalinga</button>
@@ -761,6 +1054,10 @@ function renderAdd() {
         </div>
       </label>
       <input type="hidden" id="f_necessity" value="${exp?exp.necessity:'reikalinga'}" />
+      <label class="checkbox-field"><input type="checkbox" id="f_fromsavings" onchange="document.getElementById('f_event_wrap').style.display=this.checked?'block':'none';" ${exp&&exp.fromSavings?'checked':''} /> Apmokėta iš santaupų (neįtraukti į mėnesio biudžetą)</label>
+      <div id="f_event_wrap" style="display:${exp&&exp.fromSavings?'block':'none'};">
+        <label class="field">Kelionės/įvykio pavadinimas (nebūtina)<input id="f_event" type="text" placeholder="pvz. Kelionė į Ispaniją" value="${exp?escapeHtml(exp.event||''):''}" /></label>
+      </div>
       <div style="display:flex;gap:8px;">
         <button type="submit" class="submit-btn">${exp?ICONS.check:ICONS.plus} ${exp?"Išsaugoti":"Įrašyti išlaidą"}</button>
         ${exp?`<button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelEdit()">Atšaukti</button>`:""}
@@ -783,6 +1080,7 @@ function editIncome(id) {
 function duplicateExpense(id) {
   const src = state.expenses.find(e => e.id === id);
   if (!src) return;
+  if (src.fromSavings) state.savingsBalance -= Number(src.amount);
   state.expenses.unshift({ ...src, id: uid(), date: new Date().toISOString().slice(0,10), recurringId: undefined });
   persistAll(); render();
   showToast("Įrašas nukopijuotas su šiandienos data");
@@ -801,19 +1099,28 @@ function submitAdd(ev) {
   }
   const date = document.getElementById("f_date").value;
   if (!date) { state.formError = "Pasirink datą."; render(); return false; }
+  const fromSavings = document.getElementById("f_fromsavings").checked;
+  const event = fromSavings ? document.getElementById("f_event").value.trim() : "";
   const fields = {
     amount, category: document.getElementById("f_category").value,
     date, note: document.getElementById("f_note").value.trim(),
     necessity: document.getElementById("f_necessity").value,
+    fromSavings, event,
   };
   if (state.editingExpenseId) {
     const idx = state.expenses.findIndex(e => e.id === state.editingExpenseId);
-    if (idx !== -1) state.expenses[idx] = { ...state.expenses[idx], ...fields };
+    if (idx !== -1) {
+      const old = state.expenses[idx];
+      if (old.fromSavings) state.savingsBalance += Number(old.amount);
+      if (fromSavings) state.savingsBalance -= amount;
+      state.expenses[idx] = { ...old, ...fields };
+    }
     state.editingExpenseId = null;
     showToast("Išlaida atnaujinta");
   } else {
+    if (fromSavings) state.savingsBalance -= amount;
     state.expenses.unshift({ id: uid(), ...fields });
-    showToast("Išlaida įrašyta");
+    showToast(fromSavings ? "Išlaida įrašyta iš santaupų" : "Išlaida įrašyta");
   }
   state.formError = null;
   const entryMonth = budgetMonthKeyForDate(date);
@@ -947,7 +1254,7 @@ function renderMonthlyReport() {
       <div class="empty" style="text-align:center;padding:40px 0;">Šiam mėnesiui duomenų nėra.</div>`;
   }
 
-  const sorted = [...state.categories].filter(c=>catType(c)!=="investment").sort((a,b) => (d.byCategory[b]||0)-(d.byCategory[a]||0));
+  const sorted = [...state.categories].filter(c=>catType(c)==="expense").sort((a,b) => (d.byCategory[b]||0)-(d.byCategory[a]||0));
   const top3 = sorted.filter(c => d.byCategory[c] > 0).slice(0,3);
   const remaining = d.incomeTotal > 0 ? d.incomeTotal - d.spentTotal - d.investedTotal : d.budgetTotal - d.spentTotal;
   const remainingLabel = d.incomeTotal > 0 ? "Likutis po išlaidų ir investicijų" : (remaining>=0 ? "Likutis" : "Viršyta");
@@ -982,7 +1289,9 @@ function renderMonthlyReport() {
 
 function renderSettings() {
   const rows = state.categories.map((c, idx) => {
-    const isInv = catType(c) === "investment";
+    const catT = catType(c);
+    const isInv = catT === "investment";
+    const isLoan = catT === "loan";
     const cfg = state.categoryConfig[c] || {};
     if (state.editingCategory === c) {
       return `<div class="settings-row ledger-row" style="flex-direction:column;align-items:stretch;">
@@ -993,8 +1302,9 @@ function renderSettings() {
           <button class="icon-btn" onclick="state.editingCategory=null;render();">${ICONS.x}</button>
         </div>
         <div class="toggle-row" style="margin-bottom:8px;">
-          <button type="button" class="toggle-btn ${!isInv?'active':''}" onclick="toggleCategoryType('${c}')">Išlaidų</button>
-          <button type="button" class="toggle-btn ${isInv?'active blue':''}" onclick="toggleCategoryType('${c}')">Investicinė</button>
+          <button type="button" class="toggle-btn ${catT==='expense'?'active':''}" onclick="setCategoryType('${c}','expense')">Išlaidų</button>
+          <button type="button" class="toggle-btn ${isInv?'active blue':''}" onclick="setCategoryType('${c}','investment')">Investicinė</button>
+          <button type="button" class="toggle-btn ${isLoan?'active blue':''}" onclick="setCategoryType('${c}','loan')">Paskola</button>
         </div>
         ${isInv ? `
           <div class="toggle-row" style="margin-bottom:8px;">
@@ -1006,6 +1316,9 @@ function renderSettings() {
              <div style="font-size:11px;color:var(--faint);margin-top:4px;">% nuo mėnesio pajamų</div>` :
             `<div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">tikslas / mėn.</span></div>`
           }
+        ` : isLoan ? `
+          <div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.loanTotal ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','loanTotal', this.value)" /><span style="font-size:11px;color:var(--faint);">bendra paskolos suma</span></div>
+          <div style="font-size:11px;color:var(--faint);margin-top:4px;">Sumokėta iki šiol: €${fmt(allTimePaidForCategory(c))} · Liko: €${fmt(loanRemaining(c))}</div>
         ` : `
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">biudžetas / mėn.</span></div>
           <label class="checkbox-field"><input type="checkbox" ${isEssential(c)?'checked':''} onchange="toggleEssential('${c}')" /> Būtina išlaida (biudžetas nesikeičia, jei pajamos svyruoja)</label>
@@ -1014,6 +1327,8 @@ function renderSettings() {
     }
     const rightSide = isInv
       ? `<span class="cat-tag" style="margin-right:6px;">Investicija</span><span class="tape" style="font-size:13px;color:var(--faint);">${cfg.goalType==='percent' ? `${cfg.goalPercent||0}% pajamų` : `€${fmt(state.budgets[c]||0)}`}</span>`
+      : isLoan
+      ? `<span class="cat-tag" style="color:var(--blue);border-color:var(--blue);margin-right:6px;">Paskola</span><span class="tape" style="font-size:13px;color:var(--faint);">liko €${fmt(loanRemaining(c))}</span>`
       : `<span class="cat-tag" style="${isEssential(c) ? '' : 'border-color:var(--gold);color:var(--gold);'}margin-right:6px;">${isEssential(c) ? 'būtina' : 'lanksti'}</span><span class="tape" style="font-size:13px;color:var(--faint);">€${fmt(state.budgets[c]||0)}</span>`;
     return `<div class="settings-row ledger-row">
       <div style="display:flex;flex-direction:column;gap:0;flex-shrink:0;">
@@ -1031,14 +1346,30 @@ function renderSettings() {
     </div>`;
   }).join("");
 
-  const recurringRows = state.recurringTemplates.map(t => `
+  const recurringRows = state.recurringTemplates.map(t => {
+    if (state.editingRecurringId === t.id) {
+      return `<div class="ledger-row" style="padding:10px 0;">
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input id="rec_edit_amount" type="text" inputmode="decimal" value="${t.amount}" style="flex:1;" />
+          <select id="rec_edit_category" style="flex:1;">${state.categories.filter(c=>catType(c)!=="investment").map(c=>`<option value="${c}" ${t.category===c?'selected':''}>${c}</option>`).join("")}</select>
+        </div>
+        <input id="rec_edit_note" type="text" value="${escapeHtml(t.note||'')}" placeholder="Pastaba" style="margin-bottom:6px;" />
+        <div style="display:flex;gap:8px;">
+          <button class="icon-btn" style="color:var(--gold)" onclick="confirmEditRecurring('${t.id}')">${ICONS.check}</button>
+          <button class="icon-btn" onclick="state.editingRecurringId=null;render();">${ICONS.x}</button>
+        </div>
+      </div>`;
+    }
+    return `
     <div class="ledger-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:13px;">
-      <span>${catEmoji(t.category)}${t.category}${t.note?` · ${t.note}`:""}</span>
+      <span>${catEmoji(t.category)}${escapeHtml(t.category)}${t.note?` · ${escapeHtml(t.note)}`:""}</span>
       <span style="display:flex;align-items:center;gap:8px;">
         <span class="tape">€${fmt(t.amount)}/mėn.</span>
+        <button class="icon-btn" onclick="state.editingRecurringId='${t.id}';render();" aria-label="Redaguoti">${ICONS.pencil}</button>
         <button class="icon-btn" style="color:var(--rust);" onclick="deleteRecurringTemplate('${t.id}')" aria-label="Ištrinti pasikartojančią išlaidą">${ICONS.trash}</button>
       </span>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   const exportDays = daysSinceExport();
   const exportReminder = exportDays === null
@@ -1047,7 +1378,10 @@ function renderSettings() {
       ? `<div style="font-size:12px;color:var(--gold);margin-top:8px;">Paskutinį kartą eksportavai prieš ${exportDays} d. — vertėtų atnaujinti kopiją.</div>`
       : `<div style="font-size:12px;color:var(--faint);margin-top:8px;">Paskutinį kartą eksportuota prieš ${exportDays} d.</div>`;
 
-  return `<div class="topbar"><div class="eyebrow">Nustatymai</div></div>
+  return `<div class="topbar" style="display:flex;align-items:center;justify-content:space-between;">
+    <div class="eyebrow">Nustatymai</div>
+    <button class="icon-btn" onclick="state.showHelp=true;render();" aria-label="Pagalba" style="border:1px solid rgba(237,234,224,0.15);border-radius:50%;width:26px;height:26px;justify-content:center;">?</button>
+  </div>
   <div class="tabpanel fade-in">
     <div class="section-label">Kategorijos</div>
     ${rows}
@@ -1057,6 +1391,7 @@ function renderSettings() {
         <div class="toggle-row">
           <button type="button" class="toggle-btn active" id="newcat_expense" onclick="setNewCatType('expense')">Išlaidų</button>
           <button type="button" class="toggle-btn" id="newcat_invest" onclick="setNewCatType('investment')">Investicinė</button>
+          <button type="button" class="toggle-btn" id="newcat_loan" onclick="setNewCatType('loan')">Paskola</button>
         </div>
       </label>
       <input type="hidden" id="newcat_type" value="expense" />
@@ -1068,6 +1403,10 @@ function renderSettings() {
         </div>
         <input type="hidden" id="newcat_goaltype" value="amount" />
         <input id="newcat_goalval" type="text" inputmode="decimal" placeholder="pvz. 200 arba 15" />
+      </div>
+      <div id="newcat_loan_wrap" style="display:none;">
+        <label class="field">Bendra paskolos suma (€)<input id="newcat_loantotal" type="text" inputmode="decimal" placeholder="pvz. 5000" /></label>
+        <div style="font-size:11px;color:var(--faint);margin-top:4px;">Kiekvienas įrašas šioje kategorijoje sumažins likusią skolą.</div>
       </div>
       <button type="submit" class="submit-btn">${ICONS.plus} Pridėti kategoriją</button>
     </form>
@@ -1083,6 +1422,12 @@ function renderSettings() {
       <button type="submit" class="submit-btn">${ICONS.plus} Pridėti pasikartojančias išlaidas</button>
     </form>
     <div style="font-size:12px;color:var(--faint);margin-top:8px;">Kiekvieno mėnesio 1 dieną automatiškai pridedama kaip išlaida.</div>
+
+    <div class="section-label" style="margin-top:24px;">Banko išrašo importas</div>
+    <label class="submit-btn" style="background:var(--blue);color:var(--ink);text-align:center;">
+      ${ICONS.plus} Importuoti CSV failą<input type="file" accept=".csv,text/csv" style="display:none;" onchange="handleCsvFile(this)" />
+    </label>
+    <div style="font-size:12px;color:var(--faint);margin-top:8px;">Įkelk iš banko atsisiųstą CSV išrašą — programėlė pasiūlys stulpelių atitikmenis ir kategorijas, tu peržiūri prieš patvirtindamas.</div>
 
     <div class="section-label" style="margin-top:24px;">Atsarginė kopija</div>
     <div style="display:flex;gap:8px;">
@@ -1100,6 +1445,37 @@ function renderSettings() {
       <span style="font-size:12px;color:var(--faint);">mėnesio dieną</span>
     </div>
     <div style="font-size:12px;color:var(--faint);">Jei algą gauni ne 1-ą dieną (pvz. 15-ą), nustatyk tą dieną — Apžvalga rodys tavo asmeninį mėnesį, o Ataskaitoje galėsi rinktis tarp jo ir kalendorinio.</div>
+
+    <div class="section-label" style="margin-top:24px;">Santaupos</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+      <span style="color:var(--faint)">€</span>
+      <input type="text" inputmode="decimal" value="${state.savingsBalance}" onchange="updateSavingsBalance(this.value)" style="max-width:140px;" />
+    </div>
+    <div style="font-size:12px;color:var(--faint);margin-bottom:14px;">Nustatyk savo tikrą santaupų sumą. Ji automatiškai sumažės, kai pažymėsi išlaidą kaip „apmokėta iš santaupų" (pvz. kelionėje) — tokios išlaidos neįskaičiuojamos į mėnesio biudžetą.</div>
+
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+      <span style="font-size:12px;color:var(--faint);">Minimali riba (įspėjimas)</span>
+      <span style="color:var(--faint)">€</span>
+      <input type="text" inputmode="decimal" value="${state.savingsGoalMin || ''}" placeholder="0" onchange="updateSavingsGoalMin(this.value)" style="max-width:110px;" />
+    </div>
+    <div style="font-size:12px;color:var(--faint);margin-bottom:14px;">Jei santaupos nukris žemiau šios sumos, Apžvalgoje matysi įspėjimą. 0 = išjungta.</div>
+
+    ${state.savingsLog.length ? `
+      <div style="font-size:12px;color:var(--faint);margin-bottom:4px;">Paskutiniai koregavimai:</div>
+      ${state.savingsLog.slice(0,5).map(l => `<div style="font-size:11px;color:var(--faint);padding:2px 0;">${l.date.split("-").reverse().join(".")}: €${fmt(l.from)} → €${fmt(l.to)}</div>`).join("")}
+    ` : ""}
+
+    ${(() => {
+      const groups = {};
+      state.expenses.filter(e => e.fromSavings && e.event).forEach(e => {
+        const key = e.event.trim();
+        groups[key] = (groups[key] || 0) + Number(e.amount);
+      });
+      const keys = Object.keys(groups);
+      if (keys.length === 0) return "";
+      return `<div class="section-label" style="margin-top:16px;">Kelionių / įvykių išlaidos (iš santaupų)</div>
+        ${keys.map(k => `<div class="ledger-row" style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;"><span>${escapeHtml(k)}</span><span class="tape">€${fmt(groups[k])}</span></div>`).join("")}`;
+    })()}
 
     <div class="section-label" style="margin-top:24px;">Pajamų bazė (proporcingam biudžetui)</div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
@@ -1169,7 +1545,8 @@ function exportData() {
     expenses: state.expenses, incomes: state.incomes, budgets: state.budgets,
     categories: state.categories, categoryConfig: state.categoryConfig,
     baseIncome: state.baseIncome, gaugeStyle: state.gaugeStyle, theme: state.theme,
-    recurringTemplates: state.recurringTemplates, budgetStartDay: state.budgetStartDay, exportedAt: new Date().toISOString(),
+    recurringTemplates: state.recurringTemplates, budgetStartDay: state.budgetStartDay,
+    merchantMap: state.merchantMap, importedHashes: state.importedHashes, savingsBalance: state.savingsBalance, exportedAt: new Date().toISOString(),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -1197,6 +1574,9 @@ function importDataFile(input) {
       if (data.theme) state.theme = data.theme;
       if (data.recurringTemplates) state.recurringTemplates = data.recurringTemplates;
       if (typeof data.budgetStartDay === "number") state.budgetStartDay = data.budgetStartDay;
+      if (data.merchantMap) state.merchantMap = data.merchantMap;
+      if (data.importedHashes) state.importedHashes = data.importedHashes;
+      if (typeof data.savingsBalance === "number") state.savingsBalance = data.savingsBalance;
       persistAll();
       applyTheme();
       render();
@@ -1212,8 +1592,11 @@ function setNewCatType(t) {
   document.getElementById("newcat_expense").classList.toggle("active", t === "expense");
   document.getElementById("newcat_invest").classList.toggle("active", t === "investment");
   document.getElementById("newcat_invest").classList.toggle("blue", t === "investment");
+  document.getElementById("newcat_loan").classList.toggle("active", t === "loan");
+  document.getElementById("newcat_loan").classList.toggle("blue", t === "loan");
   document.getElementById("newcat_goal_wrap").style.display = t === "investment" ? "block" : "none";
-  document.getElementById("newcat_essential_wrap").style.display = t === "investment" ? "none" : "flex";
+  document.getElementById("newcat_loan_wrap").style.display = t === "loan" ? "block" : "none";
+  document.getElementById("newcat_essential_wrap").style.display = t === "expense" ? "flex" : "none";
 }
 function setNewCatGoalType(t) {
   document.getElementById("newcat_goaltype").value = t;
@@ -1223,18 +1606,110 @@ function setNewCatGoalType(t) {
   document.getElementById("newcat_percent").classList.toggle("blue", t === "percent");
 }
 function confirmRename(oldName) { renameCategory(oldName, document.getElementById("edit_input").value); }
+function renderImportMapping() {
+  const { headers, dataRows, skippedRows } = state.importRaw;
+  const m = state.importMapping;
+  const colOptions = (selected) => `<option value="">–</option>` + headers.map((h,i) => `<option value="${i}" ${selected===i?'selected':''}>${h}</option>`).join("");
+  const previewRows = dataRows.slice(0,3);
+  const previewText = [headers, ...previewRows].map(r => r.join(" | ")).join("\n");
+  const mojibake = looksMojibake(previewText);
+  return `<div class="topbar"><div class="eyebrow">Banko išrašo importas</div></div>
+  <div class="tabpanel fade-in">
+    ${skippedRows > 0 ? `<div style="font-size:12px;color:var(--faint);margin-bottom:12px;">Praleista ${skippedRows} eilutė(-ių) prieš antraštę (aptikta automatiškai).</div>` : ""}
+    ${mojibake ? `<div style="background:rgba(217,119,66,0.15);border:1px solid var(--rust);color:var(--rust);border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:14px;">
+      Tekste matosi keisti simboliai — failas galimai ne UTF-8 koduotėje.
+      <button type="button" onclick="reReadWithEncoding('windows-1257')" style="display:block;margin-top:8px;background:var(--rust);color:var(--ink);border:none;border-radius:6px;padding:6px 10px;font-size:12px;">Bandyti kaip Windows-1257</button>
+    </div>` : ""}
+    <div class="section-label">1. Nurodyk, kur kas yra</div>
+    <label class="field">Datos stulpelis<select onchange="updateImportMapping('dateCol', this.value)">${colOptions(m.dateCol)}</select></label>
+    <div style="height:10px;"></div>
+    <label class="field">Sumos stulpelis<select onchange="updateImportMapping('amountCol', this.value)">${colOptions(m.amountCol)}</select></label>
+    <div style="height:10px;"></div>
+    <label class="field">Aprašymo / gavėjo stulpelis (nebūtina)<select onchange="updateImportMapping('descCol', this.value)">${colOptions(m.descCol)}</select></label>
+    ${m.currencyCol !== null ? `<div style="height:10px;"></div><label class="field">Valiutos stulpelis (aptikta — importuosime tik EUR)<select onchange="updateImportMapping('currencyCol', this.value)">${colOptions(m.currencyCol)}</select></label>` : ""}
+    ${m.statusCol !== null ? `<div style="height:10px;"></div><label class="field">Būsenos stulpelis (aptikta — praleisim neįvykdytas)<select onchange="updateImportMapping('statusCol', this.value)">${colOptions(m.statusCol)}</select></label>` : ""}
+    <label class="checkbox-field" style="margin-top:12px;"><input type="checkbox" ${m.allExpense?'checked':''} onchange="updateImportMapping('allExpense', this.checked)" /> Visos šio failo sumos yra išlaidos (ne pajamos)</label>
+
+    <div class="section-label" style="margin-top:20px;">Peržiūra (antraštė + pirmos 3 eilutės)</div>
+    <div style="overflow-x:auto;font-size:11px;color:var(--faint);border:1px solid rgba(237,234,224,0.1);border-radius:8px;padding:8px;">
+      <div style="white-space:nowrap;padding:3px 0;color:var(--gold);font-weight:600;">${escapeHtml(headers.join(" | "))}</div>
+      ${previewRows.map(r => `<div style="white-space:nowrap;padding:3px 0;border-bottom:1px solid rgba(237,234,224,0.06);">${escapeHtml(r.join(" | "))}</div>`).join("")}
+    </div>
+
+    <div style="display:flex;gap:8px;margin-top:20px;">
+      <button class="submit-btn" onclick="proceedToReview()">Toliau</button>
+      <button class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
+    </div>
+  </div>`;
+}
+
+function renderImportReview() {
+  const drafts = state.importDrafts;
+  const includedCount = drafts.filter(d => d.include).length;
+  const rows = drafts.map(d => `
+    <div class="ledger-row" style="opacity:${d.include?1:0.4};">
+      <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;">
+        <input type="checkbox" ${d.include?'checked':''} onchange="toggleDraftInclude('${d.id}')" style="margin-top:4px;" />
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.rawDesc) || "(be aprašymo)"}</div>
+          <div style="font-size:11px;color:var(--faint);margin-bottom:6px;">${d.date.split("-").reverse().join(".")}${d.duplicate?' · <span style="color:var(--rust)">galima dublė</span>':''}</div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <select onchange="updateDraftKind('${d.id}', this.value)" style="width:auto;height:32px;font-size:12px;padding:0 6px;">
+              <option value="expense" ${d.kind==='expense'?'selected':''}>Išlaida</option>
+              <option value="income" ${d.kind==='income'?'selected':''}>Pajama</option>
+            </select>
+            ${d.kind === "expense" ? `<select onchange="updateDraftCategory('${d.id}', this.value)" style="width:auto;height:32px;font-size:12px;padding:0 6px;">
+              ${state.categories.map(c=>`<option value="${c}" ${d.category===c?'selected':''}>${c}</option>`).join("")}
+            </select>` : ""}
+            <span class="tape" style="font-size:13px;margin-left:auto;">€${fmt(d.amount)}</span>
+          </div>
+        </div>
+      </div>
+    </div>`).join("");
+
+  return `<div class="topbar"><div class="eyebrow">Peržiūrėk prieš importuojant</div></div>
+  <div class="tabpanel fade-in">
+    <div style="font-size:12px;color:var(--faint);margin-bottom:12px;">Rasta ${drafts.length} įrašų. Pažymėti dublikatai (jau importuoti anksčiau) automatiškai nuimti — peržiūrėk kategorijas ir patvirtink.</div>
+    ${state.importSkippedInfo ? `<div style="font-size:12px;color:var(--gold);margin-bottom:12px;">${state.importSkippedInfo}</div>` : ""}
+    ${rows}
+    <div style="display:flex;gap:8px;margin-top:16px;">
+      <button class="submit-btn" onclick="confirmImport()">Importuoti pažymėtus (${includedCount})</button>
+      <button class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
+    </div>
+  </div>`;
+}
 function submitAddCategory(ev) {
   ev.preventDefault();
   const name = document.getElementById("new_cat").value;
   const type = document.getElementById("newcat_type").value;
   const goalType = document.getElementById("newcat_goaltype") ? document.getElementById("newcat_goaltype").value : "amount";
   const goalVal = document.getElementById("newcat_goalval") ? document.getElementById("newcat_goalval").value : "0";
+  const loanTotal = document.getElementById("newcat_loantotal") ? document.getElementById("newcat_loantotal").value : "0";
   const essential = document.getElementById("newcat_essential") ? document.getElementById("newcat_essential").checked : true;
-  addCategory(name, type, goalType, goalType === "percent" ? goalVal : 0, essential);
-  if (type === "investment" && goalType === "amount") { state.budgets[name.trim()] = parseFloat(String(goalVal).replace(",",".")) || 0; persistAll(); }
+  if (type === "loan") {
+    addCategory(name, type, null, loanTotal, essential);
+  } else {
+    addCategory(name, type, goalType, goalType === "percent" ? goalVal : 0, essential);
+    if (type === "investment" && goalType === "amount") { state.budgets[name.trim()] = parseFloat(String(goalVal).replace(",",".")) || 0; persistAll(); }
+  }
   return false;
 }
 
+function renderHelp() {
+  const section = (title, body) => `<div style="margin-bottom:18px;"><div class="display" style="font-size:15px;font-weight:600;color:var(--gold);margin-bottom:6px;">${title}</div><div style="font-size:13px;color:var(--paper);line-height:1.5;">${body}</div></div>`;
+  return `<div class="topbar" style="display:flex;align-items:center;justify-content:space-between;">
+    <div class="eyebrow">Pagalba</div>
+    <button class="icon-btn" onclick="state.showHelp=false;render();" aria-label="Uždaryti">${ICONS.x}</button>
+  </div>
+  <div class="tabpanel fade-in">
+    ${section("Apžvalga", "Rodo einamąjį mėnesį (arba tavo pasirinktą biudžeto laikotarpį). Indikatorius viršuje rodo likusį biudžetą — žalia/geltona/raudona. Paspaudus ant kategorijos, sąrašas filtruojasi tik jai.")}
+    ${section("Pridėti", "Įvesk išlaidą arba pajamą. „Apmokėta iš santaupų” pažymėk, kai mokate iš anksčiau sutaupytų pinigų, ne iš šio mėnesio biudžeto — tokia suma nebus įskaičiuota į biudžeto skaičiavimą.")}
+    ${section("Ataskaita", "Mėnesio arba metų suvestinė su automatiniais patarimais. Jei nustatei kitokią biudžeto mėnesio pradžios dieną, gali rinktis tarp „Mano mėnuo” ir „Kalendorinis”.")}
+    ${section("Nustatymai", "Kategorijų valdymas (išlaidų / investicinė / paskolos tipas), pasikartojančios išlaidos, atsarginė kopija, santaupos, banko išrašo importas ir išvaizda.")}
+    ${section("Kategorijų tipai", "<b>Išlaidų</b> — įprastas mėnesio biudžetas. <b>Investicinė</b> — tikslas, spalvos atvirkštinės (žalia = pasiektas). <b>Paskola</b> — mažėjantis likutis, kiekvienas įrašas sumažina liekamą skolą.")}
+    ${section("Duomenų saugumas", "Visi duomenys saugomi tik šiame telefone/naršyklėje. Rekomenduojama kartkartėmis pasidaryti atsarginę kopiją (Nustatymai → Eksportuoti).")}
+  </div>`;
+}
 function renderLockScreen() {
   const err = state.pinError ? `<div style="color:var(--rust);font-size:13px;margin-top:10px;">${state.pinError}</div>` : "";
   return `<div style="min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center;">
@@ -1266,6 +1741,9 @@ function render() {
     if (pi) pi.focus();
     return;
   }
+  if (state.showHelp) { app.innerHTML = renderHelp(); return; }
+  if (state.importStep === "mapping") { app.innerHTML = renderImportMapping(); return; }
+  if (state.importStep === "review") { app.innerHTML = renderImportReview(); return; }
   let body = "";
   if (state.tab === "overview") body = renderOverview();
   else if (state.tab === "add") body = renderAdd();
