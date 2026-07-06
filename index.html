@@ -546,29 +546,35 @@ function parseFlexibleAmount(raw) {
 function hashRow(date, amount, desc) { return `${date}|${amount}|${(desc||"").slice(0,40)}`; }
 
 function processCsvText(text) {
-  const allRows = parseCSV(text);
-  const headerIdx = findHeaderRowIndex(allRows);
-  const headers = allRows[headerIdx];
-  const dataRows = allRows.slice(headerIdx + 1);
-  if (dataRows.length === 0) { alert("Faile nerasta duomenų eilučių."); return; }
-  state.importRaw = { headers, dataRows, skippedRows: headerIdx };
-  state.importMapping = {
-    dateCol: guessColumn(headers, ["data", "date"]),
-    amountCol: guessColumn(headers, ["suma", "amount", "value"], ["likutis", "balance"]),
-    descCol: guessColumn(headers, ["gavėjas", "gavejas", "aprašymas", "aprasymas", "description", "payee", "detalės", "detales", "mokėjimo paskirtis", "paskirtis"]),
-    currencyCol: guessColumn(headers, ["valiuta", "currency", "ccy"]),
-    statusCol: guessColumn(headers, ["state", "statusas", "būsena", "busena"]),
-    allExpense: false,
-  };
-  state.importStep = "mapping";
-  render();
+  try {
+    const allRows = parseCSV(text);
+    if (!allRows || allRows.length === 0) { alert("Failas tuščias arba nepavyko perskaityti."); return; }
+    const headerIdx = findHeaderRowIndex(allRows);
+    const headers = allRows[headerIdx];
+    const dataRows = allRows.slice(headerIdx + 1);
+    if (dataRows.length === 0) { alert("Faile nerasta duomenų eilučių (rasta tik " + allRows.length + " eilutė(-ių) iš viso)."); return; }
+    state.importRaw = { headers, dataRows, skippedRows: headerIdx };
+    state.importMapping = {
+      dateCol: guessColumn(headers, ["data", "date"]),
+      amountCol: guessColumn(headers, ["suma", "amount", "value"], ["likutis", "balance"]),
+      descCol: guessColumn(headers, ["gavėjas", "gavejas", "aprašymas", "aprasymas", "description", "payee", "detalės", "detales", "mokėjimo paskirtis", "paskirtis"]),
+      currencyCol: guessColumn(headers, ["valiuta", "currency", "ccy"]),
+      statusCol: guessColumn(headers, ["state", "statusas", "būsena", "busena"]),
+      allExpense: false,
+    };
+    state.importStep = "mapping";
+    render();
+  } catch (err) {
+    alert("Klaida skaitant failą: " + err.message);
+  }
 }
 function handleCsvFile(input) {
   const file = input.files && input.files[0];
-  if (!file) return;
+  if (!file) { alert("Failas nepasirinktas. Patikrink, ar failo pavadinimas tikrai baigiasi .csv (Windows kartais paslepia tikrą plėtinį)."); return; }
   state.importFile = file;
   const reader = new FileReader();
   reader.onload = (e) => processCsvText(e.target.result);
+  reader.onerror = () => alert("Nepavyko perskaityti failo: " + reader.error);
   reader.readAsText(file, "UTF-8");
 }
 function reReadWithEncoding(encoding) {
@@ -1447,7 +1453,7 @@ function renderSettings() {
 
     <div class="section-label" style="margin-top:24px;">Banko išrašo importas</div>
     <label class="submit-btn" style="background:var(--blue);color:var(--ink);text-align:center;">
-      ${ICONS.plus} Importuoti CSV failą<input type="file" accept=".csv,text/csv" style="display:none;" onchange="handleCsvFile(this)" />
+      ${ICONS.plus} Importuoti CSV failą<input type="file" accept=".csv,.txt,text/csv,text/plain,*/*" style="display:none;" onchange="handleCsvFile(this)" />
     </label>
     <div style="font-size:12px;color:var(--faint);margin-top:8px;">Įkelk iš banko atsisiųstą CSV išrašą — programėlė pasiūlys stulpelių atitikmenis ir kategorijas, tu peržiūri prieš patvirtindamas.</div>
 
