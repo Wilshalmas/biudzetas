@@ -1057,8 +1057,8 @@ function renderAdd() {
         </label>
         <label class="field">Data<input id="i_date" type="date" value="${inc?inc.date:new Date().toISOString().slice(0,10)}" /></label>
         <div style="display:flex;gap:8px;">
-          <button type="submit" class="submit-btn" style="background:var(--green);">${inc?ICONS.check:ICONS.plus} ${inc?"Išsaugoti":"Įrašyti pajamas"}</button>
-          ${inc?`<button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelEdit()">Atšaukti</button>`:""}
+          <button type="submit" class="submit-btn" style="background:var(--green);flex:1;width:auto;">${inc?ICONS.check:ICONS.plus} ${inc?"Išsaugoti":"Įrašyti pajamas"}</button>
+          ${inc?`<button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelEdit()">Atšaukti</button>`:""}
         </div>
       </form>
     </div>`;
@@ -1084,8 +1084,8 @@ function renderAdd() {
         <label class="field">Kelionės/įvykio pavadinimas (nebūtina)<input id="f_event" type="text" placeholder="pvz. Kelionė į Ispaniją" value="${exp?escapeHtml(exp.event||''):''}" /></label>
       </div>
       <div style="display:flex;gap:8px;">
-        <button type="submit" class="submit-btn">${exp?ICONS.check:ICONS.plus} ${exp?"Išsaugoti":"Įrašyti išlaidą"}</button>
-        ${exp?`<button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelEdit()">Atšaukti</button>`:""}
+        <button type="submit" class="submit-btn" style="flex:1;width:auto;">${exp?ICONS.check:ICONS.plus} ${exp?"Išsaugoti":"Įrašyti išlaidą"}</button>
+        ${exp?`<button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelEdit()">Atšaukti</button>`:""}
       </div>
     </form>
   </div>`;
@@ -1665,8 +1665,8 @@ function renderImportMapping() {
     </div>
 
     <div style="display:flex;gap:8px;margin-top:20px;">
-      <button type="button" class="submit-btn" onclick="proceedToReview()">Toliau</button>
-      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
+      <button type="button" class="submit-btn" style="flex:1;width:auto;" onclick="proceedToReview()">Toliau</button>
+      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
     </div>
   </div>`;
 }
@@ -1701,8 +1701,8 @@ function renderImportReview() {
     ${state.importSkippedInfo ? `<div style="font-size:12px;color:var(--gold);margin-bottom:12px;">${state.importSkippedInfo}</div>` : ""}
     ${rows}
     <div style="display:flex;gap:8px;margin-top:16px;">
-      <button type="button" class="submit-btn" onclick="confirmImport()">Importuoti pažymėtus (${includedCount})</button>
-      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
+      <button type="button" class="submit-btn" style="flex:1;width:auto;" onclick="confirmImport()">Importuoti pažymėtus (${includedCount})</button>
+      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
     </div>
   </div>`;
 }
