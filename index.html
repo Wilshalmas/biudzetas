@@ -530,7 +530,7 @@ function updateCategoryGoal(name, field, val) {
   state.categoryConfig[name][field] = numericFields.includes(field) ? (parseFloat(String(val).replace(",",".")) || 0) : val;
   persistAll(); render();
 }
-function updateBudget(c, val) { state.budgets[c] = val; persistAll(); }
+function updateBudget(c, val) { state.budgets[c] = parseFloat(String(val).replace(",",".")) || 0; persistAll(); }
 function updateBaseIncome(val) { state.baseIncome = parseFloat(String(val).replace(",",".")) || 0; persistAll(); render(); }
 function updateSavingsBalance(val) {
   const newVal = parseFloat(String(val).replace(",",".")) || 0;
@@ -1041,6 +1041,12 @@ function renderOverview() {
       <span>Investuota: <b style="color:var(--blue)">€${fmt(d.investedTotal)}</b></span>
       <span>Santaupos: <b style="color:${state.savingsBalance<0?'var(--rust)':'var(--gold)'}">€${fmt(state.savingsBalance)}</b></span>
     </div>
+    ${d.incomeTotal > 0 ? (() => {
+      const totalAllocated = d.spentTotal + d.investedTotal;
+      const pctOfIncome = (totalAllocated / d.incomeTotal) * 100;
+      const overIncome = totalAllocated > d.incomeTotal;
+      return `<div style="text-align:center;font-size:11px;margin-top:6px;color:${overIncome?'var(--rust)':'var(--faint)'};">Iš viso paskirstyta (išlaidos + investicijos): €${fmt(totalAllocated)} — ${Math.round(pctOfIncome)}% pajamų${overIncome ? ' ⚠️ viršija pajamas' : ''}</div>`;
+    })() : ""}
     ${d.savingsSpent > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:4px;">Iš jų €${fmt(d.savingsSpent)} apmokėta iš santaupų šį mėnesį (neįskaičiuota į biudžetą)</div>` : ""}
     ${d.budgetTotal > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:6px;">Vidutiniškai €${fmt(avgDaily)}/d. · ${
       prog.remaining > 0
