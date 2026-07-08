@@ -87,6 +87,12 @@
   .stat-value { font-size: 17px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .insight { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin-bottom: 10px; }
   .settings-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; gap: 8px; flex-wrap: wrap; }
+  .field-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 0; border-bottom: 1px solid rgba(237,234,224,0.06); }
+  .field-row:last-of-type { border-bottom: none; }
+  .field-row-label { font-size: 13px; color: var(--paper); flex: 1; min-width: 0; }
+  .field-row-input { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .field-row-input input { width: 100px; text-align: right; height: 38px; }
+  .field-row-hint { font-size: 11px; color: var(--faint); margin-top: -4px; margin-bottom: 10px; line-height: 1.4; }
   .empty { color: var(--faint); font-size: 14px; padding: 10px 0; }
   .chart-wrap { position: relative; height: 190px; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; }
   .chart-wrap canvas { display: block; margin: 0 auto; max-width: 190px; max-height: 190px; }
@@ -280,6 +286,7 @@ let state = {
   calcResult: null,
   calcType: "car",
   netWorthHistory: load("netWorthHistory", []),
+  expandedRuleInfo: {},
   searchQuery: "",
   categoryFilter: null,
   editingExpenseId: null,
@@ -287,6 +294,8 @@ let state = {
   formError: null,
   appPin: load("appPin", null),
   appLocked: false,
+  pinAttempts: 0,
+  pinLockedUntil: null,
   reportMode: "month",
   reportYear: new Date().getFullYear(),
   reportCursor: null,
@@ -1033,7 +1042,11 @@ function renderOverview() {
       <span>Santaupos: <b style="color:${state.savingsBalance<0?'var(--rust)':'var(--gold)'}">€${fmt(state.savingsBalance)}</b></span>
     </div>
     ${d.savingsSpent > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:4px;">Iš jų €${fmt(d.savingsSpent)} apmokėta iš santaupų šį mėnesį (neįskaičiuota į biudžetą)</div>` : ""}
-    ${d.budgetTotal > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:6px;">Vidutiniškai €${fmt(avgDaily)}/d. · ${suggestedDaily>=0?`liko €${fmt(suggestedDaily)}/d. iki galo`:`viršyta €${fmt(Math.abs(suggestedDaily))}/d.`}</div>` : ""}
+    ${d.budgetTotal > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:6px;">Vidutiniškai €${fmt(avgDaily)}/d. · ${
+      prog.remaining > 0
+        ? (suggestedDaily >= 0 ? `liko €${fmt(suggestedDaily)}/d. (dar ${prog.remaining} d.)` : `viršyta €${fmt(Math.abs(suggestedDaily))}/d.`)
+        : (remainingBudget >= 0 ? `paskutinė diena, liko €${fmt(remainingBudget)}` : `viršyta iš viso €${fmt(Math.abs(remainingBudget))}`)
+    }</div>` : ""}
     ${state.savingsGoalMin > 0 && state.savingsBalance < state.savingsGoalMin ? `<div class="over-warning">${ICONS.alert}<span>Santaupos (€${fmt(state.savingsBalance)}) žemiau nustatytos ribos (€${fmt(state.savingsGoalMin)})</span></div>` : ""}
     ${d.overCategories.length ? `<div class="over-warning">${ICONS.alert}<span>Viršyta: ${d.overCategories.join(", ")}</span></div>` : ""}
     ${d.underpaidLoans.length ? `<div class="over-warning">${ICONS.alert}<span>Nesumokėta min. įmoka: ${d.underpaidLoans.join(", ")}</span></div>` : ""}
@@ -1541,6 +1554,22 @@ function netWorthTrendSVG() {
   </svg>`;
 }
 
+function toggleRuleInfo(id) {
+  state.expandedRuleInfo[id] = !state.expandedRuleInfo[id];
+  render();
+}
+function ruleInfoCard(id, title, summary, details) {
+  const expanded = !!state.expandedRuleInfo[id];
+  return `<div class="tip-card" style="border-left-color:var(--blue);cursor:pointer;" onclick="toggleRuleInfo('${id}')">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-weight:600;">${title}</div>
+      <span style="color:var(--faint);font-size:16px;transform:rotate(${expanded?90:0}deg);transition:transform .2s;">›</span>
+    </div>
+    <div style="font-size:12px;color:var(--faint);margin-top:4px;">${summary}</div>
+    ${expanded ? `<div style="font-size:12px;color:var(--faint);margin-top:10px;padding-top:10px;border-top:1px solid rgba(237,234,224,0.08);line-height:1.6;">${details}</div>` : ""}
+  </div>`;
+}
+
 function renderRules() {
   const income = state.baseIncome;
   const flexCats = state.categories.filter(c => catType(c) === "expense" && !isEssential(c));
@@ -1569,18 +1598,25 @@ function renderRules() {
     </div>
 
     <div class="section-label" style="margin-top:22px;">Didelio pirkinio taisyklės (informacija)</div>
-    <div class="tip-card" style="border-left-color:var(--blue);">
-      <div style="font-weight:600;margin-bottom:4px;">🚗 Automobilio pirkimas — „20/4/10"</div>
-      <div style="font-size:12px;color:var(--faint);">Pradinis įnašas bent <b>20%</b> kainos · paskolos terminas ne ilgiau <b>4 metų</b> · mėnesio įmoka ne daugiau <b>10%</b> tavo pajamų. Kuo naujesnis automobilis, tuo didesnis nuvertėjimas — šios ribos apsaugo nuo per didelio įsipareigojimo greitai vertę prarandančiam turtui.</div>
-    </div>
-    <div class="tip-card" style="border-left-color:var(--blue);">
-      <div style="font-weight:600;margin-bottom:4px;">🏠 Būsto pirkimas — „28/36"</div>
-      <div style="font-size:12px;color:var(--faint);">Būsto paskolos įmoka (kartu su draudimu) ne daugiau <b>28%</b> pajamų · visos skolos kartu (būstas + kitos paskolos) ne daugiau <b>36%</b> pajamų. Bankai dažnai naudoja panašius rodiklius vertindami, ar suteikti paskolą.</div>
-    </div>
-    <div class="tip-card" style="border-left-color:var(--blue);">
-      <div style="font-weight:600;margin-bottom:4px;">💳 Bendra skolų riba</div>
-      <div style="font-size:12px;color:var(--faint);">Visos mėnesio skolų įmokos kartu — geriausia neviršyti <b>30%</b> pajamų bet kokiam kitam pirkiniui ar paskolai (vartojimo kreditas, lizingas ir pan.).</div>
-    </div>
+    ${ruleInfoCard("car", "🚗 Automobilio pirkimas — „20/4/10”",
+      "Pradinis įnašas bent <b>20%</b> kainos · paskolos terminas ne ilgiau <b>4 metų</b> · mėnesio įmoka ne daugiau <b>10%</b> tavo pajamų.",
+      "Automobilis pirmus kelis metus praranda vertę sparčiausiai (dažnai 15–20% per metus) — tai vadinama nuvertėjimu. Jei imi ilgą paskolą (5–7 m.), gali greitai atsidurti situacijoje, kai skolos likutis viršija automobilio rinkos vertę.<br><br>" +
+      "<b>Kodėl 20%?</b> Didesnis įnašas sumažina paskolos sumą ir apsaugo nuo šios „neigiamos nuosavybės” rizikos.<br>" +
+      "<b>Kodėl 4 metai?</b> Trumpesnis terminas — mažiau permokamų palūkanų ir greičiau tampi tikru savininku, ne tik moki bankui.<br>" +
+      "<b>Kodėl 10% pajamų?</b> Įskaičiuok ne tik įmoką, bet ir draudimą, degalus, techninę priežiūrą — realios automobilio išlaikymo išlaidos dažnai siekia 15–20% pajamų, jei įmoka jau užima 10%."
+    )}
+    ${ruleInfoCard("house", "🏠 Būsto pirkimas — „28/36”",
+      "Būsto paskolos įmoka (kartu su draudimu) ne daugiau <b>28%</b> pajamų · visos skolos kartu (būstas + kitos paskolos) ne daugiau <b>36%</b> pajamų.",
+      "Tai vadinamasis „front-end/back-end” santykis, kurį bankai naudoja jau dešimtmečius vertindami paskolos riziką.<br><br>" +
+      "<b>28% (front-end)</b> — tik būsto išlaidos: paskolos įmoka, nekilnojamojo turto mokestis, draudimas.<br>" +
+      "<b>36% (back-end)</b> — visos skolos kartu: būstas + automobilio paskola + vartojimo kreditai + kortelių įmokos.<br><br>" +
+      "Jei viršiji šias ribas, bankas gali atsisakyti suteikti paskolą arba pasiūlyti blogesnes sąlygas (aukštesnę palūkaną). Net jei bankas patvirtintų didesnę sumą, pačiam verta likti šiose ribose, kad liktų vietos nenumatytiems atvejams."
+    )}
+    ${ruleInfoCard("debt", "💳 Bendra skolų riba",
+      "Visos mėnesio skolų įmokos kartu — geriausia neviršyti <b>30%</b> pajamų bet kokiam kitam pirkiniui ar paskolai (vartojimo kreditas, lizingas ir pan.).",
+      "Tai bendresnė, atsargesnė gairė nei būsto 36%, taikoma vartojimo kreditams, lizingams ar bet kokiai kitai skolai, kuri nėra būstas ar automobilis.<br><br>" +
+      "Kuo daugiau pajamų eina skolų aptarnavimui, tuo mažiau lieka <b>lankstumo</b> — pvz. jei netektum darbo ar atsirastų nenumatyta išlaida, aukšta skolų našta paverčia bet kokį sukrėtimą krize. 30% riba palieka realią atsargą."
+    )}
 
     <div class="section-label" style="margin-top:22px;">Naujo pirkinio / paskolos skaičiuoklė</div>
     <form class="stack" onsubmit="event.preventDefault(); runCalculator();">
@@ -1713,8 +1749,8 @@ function renderMonthlyReport() {
   const canGoForward = monthKey < currentMonthKey();
   const dateModeToggle = budgetStartDay() > 1 ? `
     <div class="toggle-row" style="margin-bottom:14px;">
-      <button type="button" class="toggle-btn ${mode!=='calendar'?'active blue':''}" onclick="state.reportDateMode='budget';render();">Mano mėnuo</button>
-      <button type="button" class="toggle-btn ${mode==='calendar'?'active blue':''}" onclick="state.reportDateMode='calendar';render();">Kalendorinis</button>
+      <button type="button" class="toggle-btn ${mode!=='calendar'?'active blue':''}" onclick="state.reportDateMode='budget';state.reportCursor=currentMonthKey();render();">Mano mėnuo</button>
+      <button type="button" class="toggle-btn ${mode==='calendar'?'active blue':''}" onclick="state.reportDateMode='calendar';state.reportCursor=new Date().toISOString().slice(0,7);render();">Kalendorinis</button>
     </div>` : "";
 
   if (!d.hasData) {
@@ -1871,6 +1907,7 @@ function renderSettings() {
           <button type="button" class="toggle-btn" id="newcat_invest" onclick="setNewCatType('investment')">Investicinė</button>
           <button type="button" class="toggle-btn" id="newcat_loan" onclick="setNewCatType('loan')">Paskola</button>
         </div>
+        <div id="newcat_type_help" style="font-size:11px;color:var(--faint);margin-top:2px;">Įprasta mėnesio išlaida su biudžeto limitu.</div>
       </label>
       <input type="hidden" id="newcat_type" value="expense" />
       <label class="checkbox-field" id="newcat_essential_wrap"><input type="checkbox" id="newcat_essential" checked /> Būtina išlaida (biudžetas nesikeičia, jei pajamos svyruoja)</label>
@@ -1919,26 +1956,24 @@ function renderSettings() {
     ${exportReminder}
 
     <div class="section-label" style="margin-top:24px;">Mano biudžeto mėnuo</div>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-      <span style="font-size:12px;color:var(--faint);">Prasideda</span>
-      <input type="number" min="1" max="28" value="${state.budgetStartDay || 1}" onchange="updateBudgetStartDay(this.value)" style="max-width:70px;" />
-      <span style="font-size:12px;color:var(--faint);">mėnesio dieną</span>
+    <div class="field-row">
+      <span class="field-row-label">Prasideda mėnesio dieną</span>
+      <div class="field-row-input"><input type="number" min="1" max="28" value="${state.budgetStartDay || 1}" onchange="updateBudgetStartDay(this.value)" /></div>
     </div>
-    <div style="font-size:12px;color:var(--faint);">Jei algą gauni ne 1-ą dieną (pvz. 15-ą), nustatyk tą dieną — Apžvalga rodys tavo asmeninį mėnesį, o Ataskaitoje galėsi rinktis tarp jo ir kalendorinio.</div>
+    <div class="field-row-hint">Jei algą gauni ne 1-ą dieną (pvz. 15-ą), nustatyk tą dieną — Apžvalga rodys tavo asmeninį mėnesį, o Ataskaitoje galėsi rinktis tarp jo ir kalendorinio.</div>
 
     <div class="section-label" style="margin-top:24px;">Santaupos</div>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-      <span style="color:var(--faint)">€</span>
-      <input type="text" inputmode="decimal" value="${state.savingsBalance}" onchange="updateSavingsBalance(this.value)" style="max-width:140px;" />
+    <div class="field-row">
+      <span class="field-row-label">Dabartinė santaupų suma</span>
+      <div class="field-row-input"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.savingsBalance}" onchange="updateSavingsBalance(this.value)" /></div>
     </div>
-    <div style="font-size:12px;color:var(--faint);margin-bottom:14px;">Nustatyk savo tikrą santaupų sumą. Ji automatiškai sumažės, kai pažymėsi išlaidą kaip „apmokėta iš santaupų" (pvz. kelionėje) — tokios išlaidos neįskaičiuojamos į mėnesio biudžetą.</div>
+    <div class="field-row-hint">Nustatyk savo tikrą santaupų sumą. Ji automatiškai sumažės, kai pažymėsi išlaidą kaip „apmokėta iš santaupų” (pvz. kelionėje) — tokios išlaidos neįskaičiuojamos į mėnesio biudžetą.</div>
 
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-      <span style="font-size:12px;color:var(--faint);">Minimali riba (įspėjimas)</span>
-      <span style="color:var(--faint)">€</span>
-      <input type="text" inputmode="decimal" value="${state.savingsGoalMin || ''}" placeholder="0" onchange="updateSavingsGoalMin(this.value)" style="max-width:110px;" />
+    <div class="field-row">
+      <span class="field-row-label">Minimali riba (įspėjimas)</span>
+      <div class="field-row-input"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.savingsGoalMin || ''}" placeholder="0" onchange="updateSavingsGoalMin(this.value)" /></div>
     </div>
-    <div style="font-size:12px;color:var(--faint);margin-bottom:14px;">Jei santaupos nukris žemiau šios sumos, Apžvalgoje matysi įspėjimą. 0 = išjungta.</div>
+    <div class="field-row-hint">Jei santaupos nukris žemiau šios sumos, Apžvalgoje matysi įspėjimą. 0 = išjungta.</div>
 
     ${state.savingsLog.length ? `
       <div style="font-size:12px;color:var(--faint);margin-bottom:4px;">Paskutiniai koregavimai:</div>
@@ -1958,33 +1993,31 @@ function renderSettings() {
     })()}
 
     <div class="section-label" style="margin-top:24px;">Pajamų bazė (proporcingam biudžetui)</div>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-      <span style="color:var(--faint)">€</span>
-      <input type="text" inputmode="decimal" value="${state.baseIncome || ''}" placeholder="pvz. 1000" onchange="updateBaseIncome(this.value)" style="max-width:140px;" />
-      <span style="font-size:12px;color:var(--faint);">/ mėn. (0 = išjungta)</span>
+    <div class="field-row">
+      <span class="field-row-label">Bazinis mėnesio atlyginimas</span>
+      <div class="field-row-input"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.baseIncome || ''}" placeholder="pvz. 1000" onchange="updateBaseIncome(this.value)" /></div>
     </div>
-    <div style="font-size:12px;color:var(--faint);">Kai pajamos skiriasi nuo šios sumos, „lanksčių" kategorijų biudžetai automatiškai proporcingai padidėja arba sumažėja. „Būtinos" kategorijos (pvz. sąskaitos) nesikeičia.</div>
+    <div class="field-row-hint">Kai pajamos skiriasi nuo šios sumos, „lanksčių” kategorijų biudžetai automatiškai proporcingai padidėja arba sumažėja. „Būtinos” kategorijos (pvz. sąskaitos) nesikeičia. 0 = išjungta.</div>
 
-    <div style="margin-top:28px;padding-top:16px;border-top:1px solid rgba(237,234,224,0.08);">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
-        <span style="font-size:12px;color:var(--faint);">Apžvalgos indikatorius</span>
-        <div style="display:flex;gap:6px;">
-          <button type="button" onclick="setGaugeStyle('ring')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.gaugeStyle!=='fuel'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.gaugeStyle!=='fuel'?'rgba(201,162,39,0.12)':'transparent'};color:${state.gaugeStyle!=='fuel'?'var(--gold)':'var(--faint)'};">Žiedas</button>
-          <button type="button" onclick="setGaugeStyle('fuel')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.gaugeStyle==='fuel'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.gaugeStyle==='fuel'?'rgba(201,162,39,0.12)':'transparent'};color:${state.gaugeStyle==='fuel'?'var(--gold)':'var(--faint)'};">Rodyklė</button>
-        </div>
+    <div class="section-label" style="margin-top:28px;">Išvaizda ir sauga</div>
+    <div class="field-row">
+      <span class="field-row-label">Apžvalgos indikatorius</span>
+      <div style="display:flex;gap:6px;">
+        <button type="button" onclick="setGaugeStyle('ring')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.gaugeStyle!=='fuel'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.gaugeStyle!=='fuel'?'rgba(201,162,39,0.12)':'transparent'};color:${state.gaugeStyle!=='fuel'?'var(--gold)':'var(--faint)'};">Žiedas</button>
+        <button type="button" onclick="setGaugeStyle('fuel')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.gaugeStyle==='fuel'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.gaugeStyle==='fuel'?'rgba(201,162,39,0.12)':'transparent'};color:${state.gaugeStyle==='fuel'?'var(--gold)':'var(--faint)'};">Rodyklė</button>
       </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px;">
-        <span style="font-size:12px;color:var(--faint);">Tema</span>
-        <div style="display:flex;gap:6px;">
-          <button type="button" onclick="setTheme('dark')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='dark'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='dark'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='dark'?'var(--gold)':'var(--faint)'};">Tamsi</button>
-          <button type="button" onclick="setTheme('light')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='light'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='light'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='light'?'var(--gold)':'var(--faint)'};">Šviesi</button>
-          <button type="button" onclick="setTheme('auto')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='auto'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='auto'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='auto'?'var(--gold)':'var(--faint)'};">Auto</button>
-        </div>
+    </div>
+    <div class="field-row">
+      <span class="field-row-label">Tema</span>
+      <div style="display:flex;gap:6px;">
+        <button type="button" onclick="setTheme('dark')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='dark'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='dark'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='dark'?'var(--gold)':'var(--faint)'};">Tamsi</button>
+        <button type="button" onclick="setTheme('light')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='light'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='light'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='light'?'var(--gold)':'var(--faint)'};">Šviesi</button>
+        <button type="button" onclick="setTheme('auto')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.theme==='auto'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.theme==='auto'?'rgba(201,162,39,0.12)':'transparent'};color:${state.theme==='auto'?'var(--gold)':'var(--faint)'};">Auto</button>
       </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
-        <span style="font-size:12px;color:var(--faint);">Programėlės užraktas (PIN)</span>
-        <button type="button" onclick="${state.appPin ? 'disableAppPin()' : 'promptSetPin()'}" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.appPin?'var(--green)':'rgba(237,234,224,0.15)'};background:${state.appPin?'rgba(111,191,115,0.12)':'transparent'};color:${state.appPin?'var(--green)':'var(--faint)'};">${state.appPin ? 'Įjungtas ✓' : 'Nustatyti'}</button>
-      </div>
+    </div>
+    <div class="field-row">
+      <span class="field-row-label">Programėlės užraktas (PIN)</span>
+      <button type="button" onclick="${state.appPin ? 'disableAppPin()' : 'promptSetPin()'}" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.appPin?'var(--green)':'rgba(237,234,224,0.15)'};background:${state.appPin?'rgba(111,191,115,0.12)':'transparent'};color:${state.appPin?'var(--green)':'var(--faint)'};">${state.appPin ? 'Įjungtas ✓' : 'Nustatyti'}</button>
     </div>
   </div>`;
 }
@@ -2078,6 +2111,12 @@ function setNewCatType(t) {
   document.getElementById("newcat_goal_wrap").style.display = t === "investment" ? "block" : "none";
   document.getElementById("newcat_loan_wrap").style.display = t === "loan" ? "block" : "none";
   document.getElementById("newcat_essential_wrap").style.display = t === "expense" ? "flex" : "none";
+  const helpTexts = {
+    expense: "Įprasta mėnesio išlaida su biudžeto limitu.",
+    investment: "Mėnesio įnašo TIKSLAS (pvz. į maklerio sąskaitą) — seka, kiek įneši kiekvieną mėnesį, ne bendrą turimą sumą. Tai skiriasi nuo „Santaupų” Nustatymuose, kurios yra vienas bendras, rankiniu būdu valdomas balansas.",
+    loan: "Mažėjanti skola su minimalia mėnesio įmoka, kuri įskaičiuojama į biudžetą.",
+  };
+  document.getElementById("newcat_type_help").textContent = helpTexts[t];
 }
 function setNewCatGoalType(t) {
   document.getElementById("newcat_goaltype").value = t;
@@ -2193,24 +2232,47 @@ function renderHelp() {
   </div>`;
 }
 function renderLockScreen() {
+  const now = Date.now();
+  const locked = state.pinLockedUntil && state.pinLockedUntil > now;
   const err = state.pinError ? `<div style="color:var(--rust);font-size:13px;margin-top:10px;">${state.pinError}</div>` : "";
+  const secsLeft = locked ? Math.ceil((state.pinLockedUntil - now) / 1000) : 0;
   return `<div style="min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center;">
     <div style="color:var(--gold);margin-bottom:16px;">${ICONS.lock}</div>
     <div class="display" style="font-size:18px;font-weight:600;margin-bottom:16px;">Programėlė užrakinta</div>
-    <form onsubmit="return submitPin(event)" style="width:100%;max-width:220px;">
-      <input id="pin_input" type="password" inputmode="numeric" maxlength="4" placeholder="••••" autofocus style="text-align:center;font-size:22px;letter-spacing:8px;" />
-      <button type="submit" class="submit-btn" style="margin-top:14px;">Atrakinti</button>
-    </form>
-    ${err}
+    ${locked ? `
+      <div style="color:var(--rust);font-size:14px;">Per daug bandymų. Palauk ${secsLeft} sek.</div>
+    ` : `
+      <form onsubmit="return submitPin(event)" style="width:100%;max-width:220px;">
+        <input id="pin_input" type="password" inputmode="numeric" maxlength="4" placeholder="••••" autofocus style="text-align:center;font-size:22px;letter-spacing:8px;" />
+        <button type="submit" class="submit-btn" style="margin-top:14px;">Atrakinti</button>
+      </form>
+      ${err}
+    `}
   </div>`;
 }
+let pinLockTimer = null;
 function submitPin(ev) {
   ev.preventDefault();
   const val = document.getElementById("pin_input").value;
   if (val === state.appPin) {
-    state.appLocked = false; state.pinError = null; render();
+    state.appLocked = false; state.pinError = null; state.pinAttempts = 0; render();
   } else {
-    state.pinError = "Neteisingas PIN kodas."; render();
+    state.pinAttempts = (state.pinAttempts || 0) + 1;
+    if (state.pinAttempts >= 3) {
+      state.pinLockedUntil = Date.now() + 30000;
+      state.pinAttempts = 0;
+      state.pinError = null;
+      render();
+      clearInterval(pinLockTimer);
+      pinLockTimer = setInterval(() => {
+        if (!state.pinLockedUntil || state.pinLockedUntil <= Date.now()) {
+          clearInterval(pinLockTimer); state.pinLockedUntil = null; render();
+        } else { render(); }
+      }, 1000);
+    } else {
+      state.pinError = `Neteisingas PIN kodas. Liko bandymų: ${3 - state.pinAttempts}.`;
+      render();
+    }
   }
   return false;
 }
