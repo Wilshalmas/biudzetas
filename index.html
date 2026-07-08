@@ -371,10 +371,11 @@ function monthData(monthKey, mode) {
   budgetExpenses.forEach(e => byCategory[e.category] = (byCategory[e.category]||0) + Number(e.amount));
 
   const incomeTotal = incomes.reduce((s,i) => s + Number(i.amount), 0);
-  let spentTotal = 0, investedTotal = 0, loanPaidTotal = 0;
+  let spentTotal = 0, investedTotal = 0, loanPaidTotal = 0, savingsGoalTotal = 0;
   state.categories.forEach(c => {
     const t = catType(c);
     if (t === "investment") investedTotal += byCategory[c] || 0;
+    else if (t === "savingsgoal") savingsGoalTotal += byCategory[c] || 0;
     else {
       spentTotal += byCategory[c] || 0;
       if (t === "loan") loanPaidTotal += byCategory[c] || 0;
@@ -400,10 +401,10 @@ function monthData(monthKey, mode) {
     if (cfg.goalType === "percent") return incomeTotal * (Number(cfg.goalPercent)||0) / 100;
     return Number(state.budgets[c]) || 0;
   }
-  const underInvested = state.categories.filter(c => catType(c) === "investment" && (byCategory[c]||0) < investTarget(c) * 0.999 && investTarget(c) > 0);
+  const underInvested = state.categories.filter(c => (catType(c) === "investment" || catType(c) === "savingsgoal") && (byCategory[c]||0) < investTarget(c) * 0.999 && investTarget(c) > 0);
   const hasData = expenses.length > 0 || incomes.length > 0;
 
-  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, loanPaidTotal, budgetTotal, unnecessarySpent, overCategories, nearingCategories, underpaidLoans, investTarget, underInvested, hasData, savingsSpent, loanMinPayment };
+  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, loanPaidTotal, savingsGoalTotal, budgetTotal, unnecessarySpent, overCategories, nearingCategories, underpaidLoans, investTarget, underInvested, hasData, savingsSpent, loanMinPayment };
 }
 
 function monthHasData(monthKey, mode) { const d = monthData(monthKey, mode); return d.hasData; }
@@ -477,8 +478,8 @@ function addCategory(name, type, goalType, goalPercent, essential, minPayment) {
   if (!trimmed || state.categories.includes(trimmed)) return;
   state.categories.push(trimmed);
   state.budgets[trimmed] = 0;
-  state.categoryConfig[trimmed] = type === "investment"
-    ? { type: "investment", goalType: goalType || "amount", goalPercent: Number(goalPercent)||0 }
+  state.categoryConfig[trimmed] = (type === "investment" || type === "savingsgoal")
+    ? { type: type === "savingsgoal" ? "savingsgoal" : "investment", goalType: goalType || "amount", goalPercent: Number(goalPercent)||0 }
     : type === "loan"
     ? { type: "loan", loanTotal: parseFloat(String(goalPercent).replace(",", "."))||0, minPayment: parseFloat(String(minPayment).replace(",", "."))||0 }
     : { type: "expense", essential: !!essential };
@@ -507,6 +508,7 @@ function deleteCategory(name) {
 }
 function setCategoryType(name, type) {
   if (type === "investment") state.categoryConfig[name] = { type: "investment", goalType: "amount", goalPercent: 10 };
+  else if (type === "savingsgoal") state.categoryConfig[name] = { type: "savingsgoal", goalType: "amount", goalPercent: state.categoryConfig[name]?.goalPercent || 0 };
   else if (type === "loan") state.categoryConfig[name] = { type: "loan", loanTotal: state.categoryConfig[name]?.loanTotal || 0, minPayment: state.categoryConfig[name]?.minPayment || 0 };
   else state.categoryConfig[name] = { type: "expense", essential: true };
   persistAll(); render();
@@ -922,9 +924,10 @@ function catRow(c, monthKey, d, mode, clickable) {
   const spent = d.byCategory[c]||0;
   const type = catType(c);
   const isInv = type === "investment";
+  const isSavingsGoal = type === "savingsgoal";
   const isLoan = type === "loan";
   let color, pct, amountLabel, subLine = "";
-  if (isInv) {
+  if (isInv || isSavingsGoal) {
     const target = d.investTarget(c);
     color = statusColorInvestment(spent, target);
     pct = target > 0 ? Math.min(100, (spent/target)*100) : (spent>0?100:0);
@@ -943,12 +946,12 @@ function catRow(c, monthKey, d, mode, clickable) {
     pct = budget > 0 ? Math.min(100,(spent/budget)*100) : (spent>0?100:0);
     amountLabel = `€${fmt(spent)}${budget>0?` / €${fmt(budget)}`:""}`;
   }
-  const scaled = !isInv && !isLoan && !isEssential(c) && state.baseIncome > 0 && Math.abs(scaleFactorForMonth(monthKey, mode)-1) > 0.02;
+  const scaled = !isInv && !isSavingsGoal && !isLoan && !isEssential(c) && state.baseIncome > 0 && Math.abs(scaleFactorForMonth(monthKey, mode)-1) > 0.02;
   const isActive = state.categoryFilter === c;
   const clickAttr = clickable ? `onclick="toggleCategoryFilter('${c}')" style="cursor:pointer;${isActive?'background:rgba(201,162,39,0.08);border-radius:8px;':''}"` : "";
   return `<div class="ledger-row" ${clickAttr}>
     <div class="cat-line">
-      <span class="cat-name"><span>${catEmoji(c)}${c}</span>${isInv?`<span class="cat-tag">Investicija</span>`:""}${isLoan?`<span class="cat-tag" style="color:var(--blue);border-color:var(--blue);">Paskola</span>`:""}${scaled?`<span class="scaled-tag">~pritaikyta</span>`:""}</span>
+      <span class="cat-name"><span>${catEmoji(c)}${c}</span>${isInv?`<span class="cat-tag">Investicija</span>`:""}${isSavingsGoal?`<span class="cat-tag" style="color:var(--gold);border-color:var(--gold);">Taupymo tikslas</span>`:""}${isLoan?`<span class="cat-tag" style="color:var(--blue);border-color:var(--blue);">Paskola</span>`:""}${scaled?`<span class="scaled-tag">~pritaikyta</span>`:""}</span>
       <span class="tape cat-amount" style="color:${color}">${amountLabel}</span>
     </div>
     <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
@@ -1039,13 +1042,14 @@ function renderOverview() {
     <div class="income-line">
       <span>Pajamos: <b>€${fmt(d.incomeTotal)}</b></span>
       <span>Investuota: <b style="color:var(--blue)">€${fmt(d.investedTotal)}</b></span>
+      <span>Taupymo tikslai: <b style="color:var(--gold)">€${fmt(d.savingsGoalTotal)}</b></span>
       <span>Santaupos: <b style="color:${state.savingsBalance<0?'var(--rust)':'var(--gold)'}">€${fmt(state.savingsBalance)}</b></span>
     </div>
     ${d.incomeTotal > 0 ? (() => {
-      const totalAllocated = d.spentTotal + d.investedTotal;
+      const totalAllocated = d.spentTotal + d.investedTotal + d.savingsGoalTotal;
       const pctOfIncome = (totalAllocated / d.incomeTotal) * 100;
       const overIncome = totalAllocated > d.incomeTotal;
-      return `<div style="text-align:center;font-size:11px;margin-top:6px;color:${overIncome?'var(--rust)':'var(--faint)'};">Iš viso paskirstyta (išlaidos + investicijos): €${fmt(totalAllocated)} — ${Math.round(pctOfIncome)}% pajamų${overIncome ? ' ⚠️ viršija pajamas' : ''}</div>`;
+      return `<div style="text-align:center;font-size:11px;margin-top:6px;color:${overIncome?'var(--rust)':'var(--faint)'};">Iš viso paskirstyta (išlaidos + investicijos + taupymas): €${fmt(totalAllocated)} — ${Math.round(pctOfIncome)}% pajamų${overIncome ? ' ⚠️ viršija pajamas' : ''}</div>`;
     })() : ""}
     ${d.savingsSpent > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:4px;">Iš jų €${fmt(d.savingsSpent)} apmokėta iš santaupų šį mėnesį (neįskaičiuota į biudžetą)</div>` : ""}
     ${d.budgetTotal > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:6px;">Vidutiniškai €${fmt(avgDaily)}/d. · ${
@@ -1485,7 +1489,7 @@ function toggleBudgetRule(ruleId) {
     const income = state.baseIncome;
     if (!income || income <= 0) { alert("Pirma nustatyk „Pajamų bazę“ Nustatymuose."); return; }
     const flexCats = state.categories.filter(c => catType(c) === "expense" && !isEssential(c));
-    const investCats = state.categories.filter(c => catType(c) === "investment");
+    const investCats = state.categories.filter(c => catType(c) === "investment" || catType(c) === "savingsgoal");
     const snapBudgets = {};
     flexCats.forEach(c => snapBudgets[c] = state.budgets[c]);
     if (investCats.length) snapBudgets[investCats[0]] = state.budgets[investCats[0]];
@@ -1510,6 +1514,10 @@ function allTimeInvestedTotal() {
   return state.categories.filter(c => catType(c) === "investment")
     .reduce((s,c) => s + allTimePaidForCategory(c), 0);
 }
+function allTimeSavingsGoalTotal() {
+  return state.categories.filter(c => catType(c) === "savingsgoal")
+    .reduce((s,c) => s + allTimePaidForCategory(c), 0);
+}
 function allTimeLoanRemainingTotal() {
   return state.categories.filter(c => catType(c) === "loan")
     .reduce((s,c) => s + loanRemaining(c), 0);
@@ -1517,8 +1525,9 @@ function allTimeLoanRemainingTotal() {
 function computeCurrentNetWorth() {
   const savings = state.savingsBalance;
   const invested = allTimeInvestedTotal();
+  const savingsGoals = allTimeSavingsGoalTotal();
   const loans = allTimeLoanRemainingTotal();
-  return { savings, invested, loans, netWorth: savings + invested - loans };
+  return { savings, invested, savingsGoals, loans, netWorth: savings + invested + savingsGoals - loans };
 }
 function recordNetWorthSnapshot() {
   const monthKey = currentMonthKey();
@@ -1579,7 +1588,7 @@ function ruleInfoCard(id, title, summary, details) {
 function renderRules() {
   const income = state.baseIncome;
   const flexCats = state.categories.filter(c => catType(c) === "expense" && !isEssential(c));
-  const investCats = state.categories.filter(c => catType(c) === "investment");
+  const investCats = state.categories.filter(c => catType(c) === "investment" || catType(c) === "savingsgoal");
   const currentWants = flexCats.reduce((s,c) => s + (Number(state.budgets[c])||0), 0);
   const currentSavings = investCats.reduce((s,c) => s + (Number(state.budgets[c])||0), 0);
   const applied503020 = !!state.appliedRules["503020"];
@@ -1719,6 +1728,7 @@ function renderYearlyReport() {
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-label">Santaupos</div><div class="tape stat-value" style="color:var(--gold)">€${fmt(nw.savings)}</div></div>
       <div class="stat-card"><div class="stat-label">Investuota (visą laiką)</div><div class="tape stat-value" style="color:var(--blue)">€${fmt(nw.invested)}</div></div>
+      <div class="stat-card"><div class="stat-label">Taupymo tikslai (visą laiką)</div><div class="tape stat-value" style="color:var(--gold)">€${fmt(nw.savingsGoals)}</div></div>
       <div class="stat-card"><div class="stat-label">Skolos (liko)</div><div class="tape stat-value" style="color:var(--rust)">€${fmt(nw.loans)}</div></div>
       <div class="stat-card"><div class="stat-label">Grynasis turtas</div><div class="tape stat-value" style="color:${nw.netWorth>=0?'var(--green)':'var(--rust)'}">€${fmt(nw.netWorth)}</div></div>
     </div>
@@ -1806,6 +1816,7 @@ function renderSettings() {
   const rows = state.categories.map((c, idx) => {
     const catT = catType(c);
     const isInv = catT === "investment";
+    const isSavingsGoal = catT === "savingsgoal";
     const isLoan = catT === "loan";
     const cfg = state.categoryConfig[c] || {};
     if (state.editingCategory === c) {
@@ -1816,12 +1827,15 @@ function renderSettings() {
           <button class="icon-btn" style="color:var(--gold)" onclick="confirmRename('${c}')">${ICONS.check}</button>
           <button class="icon-btn" onclick="state.editingCategory=null;render();">${ICONS.x}</button>
         </div>
-        <div class="toggle-row" style="margin-bottom:8px;">
+        <div class="toggle-row" style="margin-bottom:6px;">
           <button type="button" class="toggle-btn ${catT==='expense'?'active':''}" onclick="setCategoryType('${c}','expense')">Išlaidų</button>
           <button type="button" class="toggle-btn ${isInv?'active blue':''}" onclick="setCategoryType('${c}','investment')">Investicinė</button>
+        </div>
+        <div class="toggle-row" style="margin-bottom:8px;">
+          <button type="button" class="toggle-btn ${isSavingsGoal?'active blue':''}" onclick="setCategoryType('${c}','savingsgoal')">Taupymo tikslas</button>
           <button type="button" class="toggle-btn ${isLoan?'active blue':''}" onclick="setCategoryType('${c}','loan')">Paskola</button>
         </div>
-        ${isInv ? `
+        ${(isInv || isSavingsGoal) ? `
           <div class="toggle-row" style="margin-bottom:8px;">
             <button type="button" class="toggle-btn ${cfg.goalType!=='percent'?'active blue':''}" onclick="updateCategoryGoal('${c}','goalType','amount')">€ suma</button>
             <button type="button" class="toggle-btn ${cfg.goalType==='percent'?'active blue':''}" onclick="updateCategoryGoal('${c}','goalType','percent')">% nuo pajamų</button>
@@ -1831,10 +1845,11 @@ function renderSettings() {
              <div style="font-size:11px;color:var(--faint);margin-top:4px;">% nuo mėnesio pajamų</div>` :
             `<div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">tikslas / mėn.</span></div>`
           }
+          <div style="font-size:11px;color:var(--faint);margin-top:6px;">${isSavingsGoal ? 'Taupymo tikslas — pinigai kaupiasi konkrečiam dalykui, neskaičiuojama kaip investicinis augimas.' : 'Investicija — skaičiuojama į Grynąjį turtą kaip augantis turtas.'}</div>
         ` : isLoan ? `
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.loanTotal ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','loanTotal', this.value)" /><span style="font-size:11px;color:var(--faint);">bendra paskolos suma</span></div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.minPayment ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','minPayment', this.value)" /><span style="font-size:11px;color:var(--faint);">minimali mėn. įmoka</span></div>
-          <div style="display:flex;align-items:center;gap:4px;"><input type="text" inputmode="decimal" value="${cfg.interestRate ?? ''}" style="max-width:70px;" onchange="updateCategoryGoal('${c}','interestRate', this.value)" /><span style="font-size:11px;color:var(--faint);">% metinė palūkana (nebūtina, reikia „Lavinos" strategijai)</span></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="text" inputmode="decimal" value="${cfg.interestRate ?? ''}" style="max-width:70px;" onchange="updateCategoryGoal('${c}','interestRate', this.value)" /><span style="font-size:11px;color:var(--faint);">% metinė palūkana (nebūtina, reikia „Lavinos” strategijai)</span></div>
           <div style="font-size:11px;color:var(--faint);margin-top:4px;">Sumokėta iki šiol: €${fmt(allTimePaidForCategory(c))} · Liko: €${fmt(loanRemaining(c))}</div>
         ` : `
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">biudžetas / mėn.</span></div>
@@ -1844,6 +1859,8 @@ function renderSettings() {
     }
     const rightSide = isInv
       ? `<span class="cat-tag" style="margin-right:6px;">Investicija</span><span class="tape" style="font-size:13px;color:var(--faint);">${cfg.goalType==='percent' ? `${cfg.goalPercent||0}% pajamų` : `€${fmt(state.budgets[c]||0)}`}</span>`
+      : isSavingsGoal
+      ? `<span class="cat-tag" style="color:var(--gold);border-color:var(--gold);margin-right:6px;">Taupymo tikslas</span><span class="tape" style="font-size:13px;color:var(--faint);">${cfg.goalType==='percent' ? `${cfg.goalPercent||0}% pajamų` : `€${fmt(state.budgets[c]||0)}`}</span>`
       : isLoan
       ? `<span class="cat-tag" style="color:var(--blue);border-color:var(--blue);margin-right:6px;">Paskola</span><span class="tape" style="font-size:13px;color:var(--faint);">liko €${fmt(loanRemaining(c))}</span>`
       : `<span class="cat-tag" style="${isEssential(c) ? '' : 'border-color:var(--gold);color:var(--gold);'}margin-right:6px;">${isEssential(c) ? 'būtina' : 'lanksti'}</span><span class="tape" style="font-size:13px;color:var(--faint);">€${fmt(state.budgets[c]||0)}</span>`;
@@ -1911,9 +1928,12 @@ function renderSettings() {
         <div class="toggle-row">
           <button type="button" class="toggle-btn active" id="newcat_expense" onclick="setNewCatType('expense')">Išlaidų</button>
           <button type="button" class="toggle-btn" id="newcat_invest" onclick="setNewCatType('investment')">Investicinė</button>
+        </div>
+        <div class="toggle-row" style="margin-top:6px;">
+          <button type="button" class="toggle-btn" id="newcat_savingsgoal" onclick="setNewCatType('savingsgoal')">Taupymo tikslas</button>
           <button type="button" class="toggle-btn" id="newcat_loan" onclick="setNewCatType('loan')">Paskola</button>
         </div>
-        <div id="newcat_type_help" style="font-size:11px;color:var(--faint);margin-top:2px;">Įprasta mėnesio išlaida su biudžeto limitu.</div>
+        <div id="newcat_type_help" style="font-size:11px;color:var(--faint);margin-top:6px;">Įprasta mėnesio išlaida su biudžeto limitu.</div>
       </label>
       <input type="hidden" id="newcat_type" value="expense" />
       <label class="checkbox-field" id="newcat_essential_wrap"><input type="checkbox" id="newcat_essential" checked /> Būtina išlaida (biudžetas nesikeičia, jei pajamos svyruoja)</label>
@@ -2112,14 +2132,17 @@ function setNewCatType(t) {
   document.getElementById("newcat_expense").classList.toggle("active", t === "expense");
   document.getElementById("newcat_invest").classList.toggle("active", t === "investment");
   document.getElementById("newcat_invest").classList.toggle("blue", t === "investment");
+  document.getElementById("newcat_savingsgoal").classList.toggle("active", t === "savingsgoal");
+  document.getElementById("newcat_savingsgoal").classList.toggle("blue", t === "savingsgoal");
   document.getElementById("newcat_loan").classList.toggle("active", t === "loan");
   document.getElementById("newcat_loan").classList.toggle("blue", t === "loan");
-  document.getElementById("newcat_goal_wrap").style.display = t === "investment" ? "block" : "none";
+  document.getElementById("newcat_goal_wrap").style.display = (t === "investment" || t === "savingsgoal") ? "block" : "none";
   document.getElementById("newcat_loan_wrap").style.display = t === "loan" ? "block" : "none";
   document.getElementById("newcat_essential_wrap").style.display = t === "expense" ? "flex" : "none";
   const helpTexts = {
     expense: "Įprasta mėnesio išlaida su biudžeto limitu.",
-    investment: "Mėnesio įnašo TIKSLAS (pvz. į maklerio sąskaitą) — seka, kiek įneši kiekvieną mėnesį, ne bendrą turimą sumą. Tai skiriasi nuo „Santaupų” Nustatymuose, kurios yra vienas bendras, rankiniu būdu valdomas balansas.",
+    investment: "Mėnesio įnašo TIKSLAS į augantį turtą (pvz. akcijas, fondus). Skaičiuojama į „Grynąjį turtą” kaip investicija.",
+    savingsgoal: "Mėnesio taupymo TIKSLAS konkrečiam dalykui (pvz. kelionei, dideliam pirkiniui) — pinigai kaupiasi, bet neauga kaip investicija. Atskira nuo „Santaupų” balanso Nustatymuose.",
     loan: "Mažėjanti skola su minimalia mėnesio įmoka, kuri įskaičiuojama į biudžetą.",
   };
   document.getElementById("newcat_type_help").textContent = helpTexts[t];
@@ -2217,7 +2240,7 @@ function submitAddCategory(ev) {
     addCategory(name, type, null, loanTotal, essential, minPayment);
   } else {
     addCategory(name, type, goalType, goalType === "percent" ? goalVal : 0, essential);
-    if (type === "investment" && goalType === "amount") { state.budgets[name.trim()] = parseFloat(String(goalVal).replace(",",".")) || 0; persistAll(); }
+    if ((type === "investment" || type === "savingsgoal") && goalType === "amount") { state.budgets[name.trim()] = parseFloat(String(goalVal).replace(",",".")) || 0; persistAll(); }
   }
   return false;
 }
