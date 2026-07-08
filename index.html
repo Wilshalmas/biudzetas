@@ -13,7 +13,6 @@
 <link rel="icon" href="icon-192.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <style>
   :root {
     --ink: #1B2420; --surface: #22302A; --surface-light: #2A3B33; --paper: #EDEAE0;
@@ -27,7 +26,7 @@
   html { overflow-x: hidden; height: 100%; }
   html, body { margin: 0; padding: 0; background: var(--ink); color: var(--paper); font-family: 'IBM Plex Sans', system-ui, sans-serif; }
   body { padding-bottom: calc(78px + env(safe-area-inset-bottom)); padding-top: env(safe-area-inset-top);
-    overflow-x: hidden; overscroll-behavior-x: none; overscroll-behavior-y: contain; touch-action: pan-y; width: 100%; }
+    overflow-x: hidden; overscroll-behavior-x: none; width: 100%; }
   .app { max-width: 480px; margin: 0 auto; overflow-x: hidden; width: 100%; min-height: 100vh; min-height: 100dvh; }
   .tape { font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.02em; }
   .display { font-family: 'Fraunces', Georgia, serif; }
@@ -63,6 +62,11 @@
   .bar-track { height: 4px; background: rgba(237,234,224,0.08); border-radius: 2px; overflow: hidden; }
   .bar-fill { height: 100%; border-radius: 2px; }
   .expense-row { display: flex; align-items: center; padding: 9px 0; gap: 10px; }
+  .swipe-wrapper { position: relative; overflow: hidden; }
+  .swipe-content { position: relative; background: var(--ink); touch-action: pan-y; }
+  .swipe-bg-left, .swipe-bg-right { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; gap: 6px; padding: 0 18px; font-size: 13px; font-weight: 600; color: #fff; }
+  .swipe-bg-left { left: 0; right: 0; background: var(--blue); justify-content: flex-start; }
+  .swipe-bg-right { left: 0; right: 0; background: var(--rust); justify-content: flex-end; }
   .badge { margin-left: 6px; font-size: 10px; color: var(--rust); border: 1px solid var(--rust); border-radius: 10px; padding: 1px 6px; }
   .icon-btn { background: none; border: none; color: var(--faint); padding: 4px; display: flex; align-items: center; }
   form.stack { display: flex; flex-direction: column; gap: 14px; }
@@ -116,6 +120,7 @@ const ICONS = {
   bulb: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>',
   copy: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   lock: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+  rules: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
 };
 
 const DEFAULT_CATEGORIES = ["Maistas","Transportas","Namai / Sąskaitos","Pramogos","Sveikata","Drabužiai","Kita"];
@@ -214,6 +219,28 @@ function periodLabel(key, mode) {
   return budgetMonthLabel(key);
 }
 
+function periodDateRange(monthKey, mode) {
+  const startStr = budgetMonthStartDateStr(monthKey, mode);
+  const [sy, sm, sd] = startStr.split("-").map(Number);
+  const startDate = new Date(sy, sm-1, sd);
+  let endDate;
+  if (mode === "calendar" || budgetStartDay() <= 1) {
+    endDate = new Date(sy, sm, 0);
+  } else {
+    const nextStartStr = budgetMonthStartDateStr(shiftedMonthKey(monthKey, 1), mode);
+    const [ny, nm, nd] = nextStartStr.split("-").map(Number);
+    endDate = new Date(ny, nm-1, nd-1);
+  }
+  return { startDate, endDate };
+}
+function periodProgress(monthKey, mode) {
+  const { startDate, endDate } = periodDateRange(monthKey, mode);
+  const totalDays = Math.round((endDate - startDate) / 86400000) + 1;
+  const today = new Date(); today.setHours(0,0,0,0);
+  let elapsed = Math.round((today - startDate) / 86400000) + 1;
+  elapsed = Math.max(1, Math.min(totalDays, elapsed));
+  return { totalDays, elapsed, remaining: totalDays - elapsed };
+}
 function currentMonthKey() {
   const d = new Date();
   const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -246,6 +273,13 @@ let state = {
   importSkippedInfo: null,
   showHelp: false,
   editingRecurringId: null,
+  reorderingCategories: false,
+  debtStrategy: load("debtStrategy", "snowball"),
+  appliedRules: load("appliedRules", {}),
+  ruleSnapshots: load("ruleSnapshots", {}),
+  calcResult: null,
+  calcType: "car",
+  netWorthHistory: load("netWorthHistory", []),
   searchQuery: "",
   categoryFilter: null,
   editingExpenseId: null,
@@ -294,6 +328,9 @@ function persistAll() {
   save("savingsBalance", state.savingsBalance);
   save("savingsGoalMin", state.savingsGoalMin);
   save("savingsLog", state.savingsLog);
+  save("debtStrategy", state.debtStrategy);
+  save("appliedRules", state.appliedRules);
+  save("ruleSnapshots", state.ruleSnapshots);
   save("merchantMap", state.merchantMap);
   save("importedHashes", state.importedHashes);
 }
@@ -341,6 +378,12 @@ function monthData(monthKey, mode) {
     + loanCats.reduce((s,c) => s + loanMinPayment(c), 0);
   const unnecessarySpent = budgetExpenses.filter(e => e.necessity === "nereikalinga").reduce((s,e) => s + Number(e.amount), 0);
   const overCategories = expenseCats.filter(c => (byCategory[c]||0) > effectiveBudget(c, monthKey, mode) && effectiveBudget(c, monthKey, mode) > 0);
+  const nearingCategories = expenseCats.filter(c => {
+    const b = effectiveBudget(c, monthKey, mode);
+    if (b <= 0) return false;
+    const pct = (byCategory[c]||0) / b;
+    return pct >= 0.85 && pct <= 1;
+  });
   const underpaidLoans = loanCats.filter(c => loanMinPayment(c) > 0 && (byCategory[c]||0) < loanMinPayment(c));
 
   function investTarget(c) {
@@ -351,7 +394,7 @@ function monthData(monthKey, mode) {
   const underInvested = state.categories.filter(c => catType(c) === "investment" && (byCategory[c]||0) < investTarget(c) * 0.999 && investTarget(c) > 0);
   const hasData = expenses.length > 0 || incomes.length > 0;
 
-  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, loanPaidTotal, budgetTotal, unnecessarySpent, overCategories, underpaidLoans, investTarget, underInvested, hasData, savingsSpent, loanMinPayment };
+  return { expenses, incomes, byCategory, incomeTotal, spentTotal, investedTotal, loanPaidTotal, budgetTotal, unnecessarySpent, overCategories, nearingCategories, underpaidLoans, investTarget, underInvested, hasData, savingsSpent, loanMinPayment };
 }
 
 function monthHasData(monthKey, mode) { const d = monthData(monthKey, mode); return d.hasData; }
@@ -474,7 +517,8 @@ function moveCategory(name, delta) {
 }
 function updateCategoryGoal(name, field, val) {
   if (!state.categoryConfig[name]) state.categoryConfig[name] = { type: "investment" };
-  state.categoryConfig[name][field] = (field === "goalPercent" || field === "loanTotal") ? (parseFloat(String(val).replace(",",".")) || 0) : val;
+  const numericFields = ["goalPercent", "loanTotal", "minPayment", "interestRate"];
+  state.categoryConfig[name][field] = numericFields.includes(field) ? (parseFloat(String(val).replace(",",".")) || 0) : val;
   persistAll(); render();
 }
 function updateBudget(c, val) { state.budgets[c] = val; persistAll(); }
@@ -704,15 +748,37 @@ function applyRecurringTemplates() {
   });
   if (changed) save("expenses", state.expenses);
 }
+let lastDeleted = null;
 function removeExpense(id) {
-  if (!confirm("Ištrinti šį įrašą?")) return;
-  const e = state.expenses.find(x => x.id === id);
-  if (e && e.fromSavings) state.savingsBalance += Number(e.amount);
-  state.expenses = state.expenses.filter(e => e.id !== id); persistAll(); render();
+  const idx = state.expenses.findIndex(x => x.id === id);
+  if (idx === -1) return;
+  const item = state.expenses[idx];
+  if (item.fromSavings) state.savingsBalance += Number(item.amount);
+  state.expenses.splice(idx, 1);
+  lastDeleted = { type: "expense", data: item, idx };
+  persistAll(); render();
+  showToastWithAction("Išlaida ištrinta", "Atšaukti", undoDelete);
 }
 function removeIncome(id) {
-  if (!confirm("Ištrinti šį įrašą?")) return;
-  state.incomes = state.incomes.filter(i => i.id !== id); persistAll(); render();
+  const idx = state.incomes.findIndex(x => x.id === id);
+  if (idx === -1) return;
+  const item = state.incomes[idx];
+  state.incomes.splice(idx, 1);
+  lastDeleted = { type: "income", data: item, idx };
+  persistAll(); render();
+  showToastWithAction("Pajamos ištrintos", "Atšaukti", undoDelete);
+}
+function undoDelete() {
+  if (!lastDeleted) return;
+  if (lastDeleted.type === "expense") {
+    if (lastDeleted.data.fromSavings) state.savingsBalance -= Number(lastDeleted.data.amount);
+    state.expenses.splice(lastDeleted.idx, 0, lastDeleted.data);
+  } else {
+    state.incomes.splice(lastDeleted.idx, 0, lastDeleted.data);
+  }
+  lastDeleted = null;
+  persistAll(); render();
+  showToast("Atkurta");
 }
 
 let toastTimer = null;
@@ -721,13 +787,31 @@ function showToast(msg) {
   if (!el) {
     el = document.createElement("div");
     el.id = "toast";
-    el.style.cssText = "position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--gold);color:var(--ink);padding:10px 18px;border-radius:20px;font-size:13px;font-weight:600;z-index:999;box-shadow:0 4px 14px rgba(0,0,0,0.3);max-width:85%;text-align:center;";
     document.body.appendChild(el);
   }
-  el.textContent = msg;
-  el.style.opacity = "1";
+  el.style.cssText = "position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--gold);color:var(--ink);padding:10px 18px;border-radius:20px;font-size:13px;font-weight:600;z-index:999;box-shadow:0 4px 14px rgba(0,0,0,0.3);max-width:85%;text-align:center;display:flex;align-items:center;gap:10px;opacity:1;";
+  el.innerHTML = escapeHtml(msg);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.style.transition = "opacity .4s"; el.style.opacity = "0"; }, 1800);
+}
+function showToastWithAction(msg, actionLabel, actionFn) {
+  let el = document.getElementById("toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    document.body.appendChild(el);
+  }
+  el.style.cssText = "position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--surface-light);color:var(--paper);padding:10px 14px;border-radius:20px;font-size:13px;font-weight:600;z-index:999;box-shadow:0 4px 14px rgba(0,0,0,0.3);max-width:85%;display:flex;align-items:center;gap:12px;opacity:1;";
+  el.innerHTML = "";
+  const span = document.createElement("span");
+  span.textContent = msg;
+  const btn = document.createElement("button");
+  btn.textContent = actionLabel;
+  btn.style.cssText = "background:none;border:none;color:var(--gold);font-weight:700;font-size:13px;padding:0;";
+  btn.onclick = () => { clearTimeout(toastTimer); el.style.opacity = "0"; actionFn(); };
+  el.appendChild(span); el.appendChild(btn);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.style.transition = "opacity .4s"; el.style.opacity = "0"; }, 4000);
 }
 
 function buildTips(monthKey, mode) {
@@ -872,6 +956,10 @@ function renderOverview() {
   const d = monthData(monthKey, "budget");
   const pct = d.budgetTotal > 0 ? Math.min(100, (d.spentTotal/d.budgetTotal)*100) : 0;
   const over = d.spentTotal > d.budgetTotal && d.budgetTotal > 0;
+  const prog = periodProgress(monthKey, "budget");
+  const avgDaily = d.spentTotal / prog.elapsed;
+  const remainingBudget = d.budgetTotal - d.spentTotal;
+  const suggestedDaily = prog.remaining > 0 ? remainingBudget / prog.remaining : remainingBudget;
 
   const rows = state.categories.map(c => catRow(c, monthKey, d, "budget", true)).join("");
 
@@ -887,30 +975,46 @@ function renderOverview() {
   }) : items;
   if (state.categoryFilter) filteredItems = filteredItems.filter(item => item.kind === "expense" && item.category === state.categoryFilter);
 
+  let otherMonthMatches = [];
+  if (q) {
+    const currentIds = new Set(items.map(i => i.id));
+    const allExpenses = state.expenses.filter(e => !currentIds.has(e.id) && `${e.category} ${e.note||""}`.toLowerCase().includes(q)).map(e => ({...e, kind:"expense"}));
+    const allIncomes = state.incomes.filter(i => !currentIds.has(i.id) && `${i.label}`.toLowerCase().includes(q)).map(i => ({...i, kind:"income"}));
+    otherMonthMatches = [...allExpenses, ...allIncomes].sort((a,b) => b.date.localeCompare(a.date)).slice(0, 25);
+  }
+
   const filterChip = state.categoryFilter ? `<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--gold);">
     Filtruojama: ${catEmoji(state.categoryFilter)}${state.categoryFilter}
     <button onclick="toggleCategoryFilter('${state.categoryFilter}')" class="icon-btn" style="color:var(--gold);padding:0;">${ICONS.x}</button>
   </div>` : "";
 
   const itemRows = filteredItems.length ? filteredItems.map(item => item.kind === "expense" ? `
-    <div class="expense-row ledger-row">
-      <div style="flex:1;min-width:0;">
-        <div style="font-size:14px;">${escapeHtml(item.category)}${item.necessity==="nereikalinga" ? `<span class="badge">nereikalinga</span>`:""}${item.fromSavings ? `<span class="badge" style="color:var(--gold);border-color:var(--gold);">santaupos</span>`:""}</div>
-        <div style="font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.date.split("-").reverse().join(".")}${item.note?` · ${escapeHtml(item.note)}`:""}</div>
+    <div class="swipe-wrapper" data-id="${item.id}" data-kind="expense">
+      <div class="swipe-bg-left">${ICONS.pencil} Redaguoti</div>
+      <div class="swipe-bg-right">Ištrinti ${ICONS.trash}</div>
+      <div class="swipe-content expense-row ledger-row">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:14px;">${escapeHtml(item.category)}${item.necessity==="nereikalinga" ? `<span class="badge">nereikalinga</span>`:""}${item.fromSavings ? `<span class="badge" style="color:var(--gold);border-color:var(--gold);">santaupos</span>`:""}</div>
+          <div style="font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.date.split("-").reverse().join(".")}${item.note?` · ${escapeHtml(item.note)}`:""}</div>
+        </div>
+        <span class="tape" style="font-size:15px;">€${fmt(item.amount)}</span>
+        <button class="icon-btn" onclick="duplicateExpense('${item.id}')" aria-label="Kopijuoti įrašą">${ICONS.copy}</button>
+        <button class="icon-btn" onclick="editExpense('${item.id}')" aria-label="Redaguoti įrašą">${ICONS.pencil}</button>
+        <button class="icon-btn" onclick="removeExpense('${item.id}')" aria-label="Ištrinti įrašą">${ICONS.trash}</button>
       </div>
-      <span class="tape" style="font-size:15px;">€${fmt(item.amount)}</span>
-      <button class="icon-btn" onclick="duplicateExpense('${item.id}')" aria-label="Kopijuoti įrašą">${ICONS.copy}</button>
-      <button class="icon-btn" onclick="editExpense('${item.id}')" aria-label="Redaguoti įrašą">${ICONS.pencil}</button>
-      <button class="icon-btn" onclick="removeExpense('${item.id}')" aria-label="Ištrinti įrašą">${ICONS.trash}</button>
     </div>` : `
-    <div class="expense-row ledger-row">
-      <div style="flex:1;min-width:0;">
-        <div style="font-size:14px;color:var(--green);">↑ ${escapeHtml(item.label)}</div>
-        <div style="font-size:12px;color:var(--faint);">${item.date.split("-").reverse().join(".")}</div>
+    <div class="swipe-wrapper" data-id="${item.id}" data-kind="income">
+      <div class="swipe-bg-left">${ICONS.pencil} Redaguoti</div>
+      <div class="swipe-bg-right">Ištrinti ${ICONS.trash}</div>
+      <div class="swipe-content expense-row ledger-row">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:14px;color:var(--green);">↑ ${escapeHtml(item.label)}</div>
+          <div style="font-size:12px;color:var(--faint);">${item.date.split("-").reverse().join(".")}</div>
+        </div>
+        <span class="tape" style="font-size:15px;color:var(--green);">+€${fmt(item.amount)}</span>
+        <button class="icon-btn" onclick="editIncome('${item.id}')" aria-label="Redaguoti pajamą">${ICONS.pencil}</button>
+        <button class="icon-btn" onclick="removeIncome('${item.id}')" aria-label="Ištrinti pajamą">${ICONS.trash}</button>
       </div>
-      <span class="tape" style="font-size:15px;color:var(--green);">+€${fmt(item.amount)}</span>
-      <button class="icon-btn" onclick="editIncome('${item.id}')" aria-label="Redaguoti pajamą">${ICONS.pencil}</button>
-      <button class="icon-btn" onclick="removeIncome('${item.id}')" aria-label="Ištrinti pajamą">${ICONS.trash}</button>
     </div>`
   ).join("") : `<div class="empty">${q || state.categoryFilter ? "Pagal filtrą nieko nerasta." : "Šį mėnesį įrašų nėra."}</div>`;
 
@@ -929,16 +1033,16 @@ function renderOverview() {
       <span>Santaupos: <b style="color:${state.savingsBalance<0?'var(--rust)':'var(--gold)'}">€${fmt(state.savingsBalance)}</b></span>
     </div>
     ${d.savingsSpent > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:4px;">Iš jų €${fmt(d.savingsSpent)} apmokėta iš santaupų šį mėnesį (neįskaičiuota į biudžetą)</div>` : ""}
+    ${d.budgetTotal > 0 ? `<div style="text-align:center;font-size:11px;color:var(--faint);margin-top:6px;">Vidutiniškai €${fmt(avgDaily)}/d. · ${suggestedDaily>=0?`liko €${fmt(suggestedDaily)}/d. iki galo`:`viršyta €${fmt(Math.abs(suggestedDaily))}/d.`}</div>` : ""}
     ${state.savingsGoalMin > 0 && state.savingsBalance < state.savingsGoalMin ? `<div class="over-warning">${ICONS.alert}<span>Santaupos (€${fmt(state.savingsBalance)}) žemiau nustatytos ribos (€${fmt(state.savingsGoalMin)})</span></div>` : ""}
     ${d.overCategories.length ? `<div class="over-warning">${ICONS.alert}<span>Viršyta: ${d.overCategories.join(", ")}</span></div>` : ""}
     ${d.underpaidLoans.length ? `<div class="over-warning">${ICONS.alert}<span>Nesumokėta min. įmoka: ${d.underpaidLoans.join(", ")}</span></div>` : ""}
+    ${d.nearingCategories.length ? `<div class="over-warning" style="color:var(--gold);">${ICONS.alert}<span>Artėji prie limito: ${d.nearingCategories.join(", ")}</span></div>` : ""}
   </div>
   <div class="tabpanel fade-in">
     ${state.gaugeStyle === "fuel"
       ? `<div class="chart-wrap" style="height:150px;">${fuelGaugeSVG(Math.max(d.budgetTotal-d.spentTotal,0), d.budgetTotal)}</div>`
-      : `<div class="chart-wrap"><canvas id="pieChart"></canvas>
-      <div class="chart-center"><div class="tape" style="font-size:16px;font-weight:600;" id="chartTotal"></div><div style="font-size:10px;color:var(--faint);">išleista</div></div>
-    </div>`}
+      : ringGaugeSVG(d.spentTotal, d.budgetTotal)}
     <div class="legend">
       <span><span class="legend-dot" style="background:var(--green)"></span>gerai</span>
       <span><span class="legend-dot" style="background:var(--gold)"></span>dėmesio</span>
@@ -950,6 +1054,25 @@ function renderOverview() {
     ${filterChip}
     <input id="search_input" type="text" placeholder="Ieškoti (kategorija, pastaba)..." value="${state.searchQuery}" oninput="state.searchQuery=this.value;state._focusSearch=true;render();" style="margin-bottom:12px;" />
     ${itemRows}
+    ${otherMonthMatches.length ? `
+      <div class="section-label" style="margin-top:20px;">Kitų mėnesių rezultatai</div>
+      ${otherMonthMatches.map(item => item.kind === "expense" ? `
+        <div class="ledger-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;">${escapeHtml(item.category)}</div>
+            <div style="font-size:11px;color:var(--faint);">${item.date.split("-").reverse().join(".")}${item.note?` · ${escapeHtml(item.note)}`:""}</div>
+          </div>
+          <span class="tape" style="font-size:14px;">€${fmt(item.amount)}</span>
+        </div>` : `
+        <div class="ledger-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;color:var(--green);">↑ ${escapeHtml(item.label)}</div>
+            <div style="font-size:11px;color:var(--faint);">${item.date.split("-").reverse().join(".")}</div>
+          </div>
+          <span class="tape" style="font-size:14px;color:var(--green);">+€${fmt(item.amount)}</span>
+        </div>`
+      ).join("")}
+    ` : ""}
   </div>`;
 }
 
@@ -1002,35 +1125,27 @@ function fuelGaugeSVG(remaining, budget) {
   </svg>`;
 }
 
-function drawChart() {
-  const canvas = document.getElementById("pieChart");
-  if (!canvas || typeof Chart === "undefined") return;
-  const monthKey = currentMonthKey();
-  const d = monthData(monthKey, "budget");
-  const budget = d.budgetTotal, spent = d.spentTotal;
-  const totalEl = document.getElementById("chartTotal");
-  if (totalEl) totalEl.textContent = "€" + fmt(spent);
-  if (state.chart) { state.chart.destroy(); state.chart = null; }
-
+function ringGaugeSVG(spent, budget) {
   if (budget <= 0 && spent <= 0) {
-    canvas.parentElement.innerHTML = `<div style="height:160px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;background:var(--surface);border-radius:12px;">Kai nustatysi biudžetą ir pridėsi išlaidų, čia atsiras indikatorius.</div>`;
-    return;
+    return `<div style="height:160px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;background:var(--surface);border-radius:12px;">Kai nustatysi biudžetą ir pridėsi išlaidų, čia atsiras indikatorius.</div>`;
   }
-
+  const size = 168, strokeW = 16, r = (size - strokeW) / 2, cx = size / 2, cy = size / 2;
+  const circumference = 2 * Math.PI * r;
   const remaining = Math.max(budget - spent, 0);
   const over = spent > budget && budget > 0;
-  const color = overallGaugeColor(remaining, budget);
-  const track = "rgba(237,234,224,0.08)";
-  let dataVals, dataColors;
-  if (budget <= 0) { dataVals = [1]; dataColors = [track]; }
-  else if (over) { dataVals = [1]; dataColors = [color]; }
-  else { dataVals = [remaining, spent]; dataColors = [color, track]; }
-
-  state.chart = new Chart(canvas, {
-    type: "doughnut",
-    data: { datasets: [{ data: dataVals, backgroundColor: dataColors, borderWidth: 0 }] },
-    options: { cutout: "68%", plugins: { legend: { display: false }, tooltip: { enabled: false } } }
-  });
+  const track = "rgba(237,234,224,0.12)";
+  const color = budget <= 0 ? track : overallGaugeColor(remaining, budget);
+  const fracRemaining = budget <= 0 ? 0 : (over ? 1 : remaining / budget);
+  const dashOffset = circumference * (1 - fracRemaining);
+  return `<div class="chart-wrap">
+    <svg width="100%" height="190" viewBox="0 0 ${size} ${size}" style="display:block;margin:0 auto;max-width:190px;">
+      <circle cx="${cx}" cy="${cy}" r="${r}" stroke="${track}" stroke-width="${strokeW}" fill="none"/>
+      <circle cx="${cx}" cy="${cy}" r="${r}" stroke="${color}" stroke-width="${strokeW}" fill="none"
+        stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${dashOffset.toFixed(2)}"
+        stroke-linecap="round" transform="rotate(-90 ${cx} ${cy})" />
+    </svg>
+    <div class="chart-center"><div class="tape" style="font-size:16px;font-weight:600;">€${fmt(spent)}</div><div style="font-size:10px;color:var(--faint);">išleista</div></div>
+  </div>`;
 }
 
 function renderAdd() {
@@ -1069,7 +1184,10 @@ function renderAdd() {
   <div class="tabpanel fade-in">${subtabs}${errorBox}
     <form class="stack" onsubmit="return submitAdd(event)">
       <label class="field">Suma (€)<input id="f_amount" type="text" inputmode="decimal" placeholder="0,00" value="${exp?String(exp.amount).replace('.', ','):''}" /></label>
-      <label class="field">Kategorija<select id="f_category">${state.categories.map(c=>`<option value="${c}" ${exp&&exp.category===c?'selected':''}>${c}${catType(c)==='investment'?' (investicija)':''}</option>`).join("")}</select></label>
+      <label class="field">Kategorija
+        ${!exp ? frequentCategoryChips() : ""}
+        <select id="f_category">${state.categories.map(c=>`<option value="${c}" ${exp&&exp.category===c?'selected':''}>${c}${catType(c)==='investment'?' (investicija)':''}</option>`).join("")}</select>
+      </label>
       <label class="field">Data<input id="f_date" type="date" value="${exp?exp.date:new Date().toISOString().slice(0,10)}" /></label>
       <label class="field">Pastaba (nebūtina)<input id="f_note" type="text" placeholder="pvz. kavinė su draugais" value="${exp?escapeHtml(exp.note||''):''}" /></label>
       <label class="field">Ar ši išlaida būtina?
@@ -1102,6 +1220,75 @@ function editIncome(id) {
   state.editingIncomeId = id; state.editingExpenseId = null; state.formError = null;
   state.addSubtab = "income"; state.tab = "add"; render();
 }
+let tabSwipeAttached = false;
+function attachTabSwipe() {
+  if (tabSwipeAttached) return;
+  tabSwipeAttached = true;
+  const app = document.getElementById("app");
+  const order = ["overview", "add", "report", "rules", "settings"];
+  let startX = 0, startY = 0, dragging = false, locked = false;
+  app.addEventListener("touchstart", (e) => {
+    if (state.appPin && state.appLocked) { dragging = false; return; }
+    if (state.importStep || state.showHelp) { dragging = false; return; }
+    if (e.target.closest(".swipe-wrapper")) { dragging = false; return; }
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+    dragging = true; locked = false;
+  }, { passive: true });
+  app.addEventListener("touchmove", (e) => {
+    if (!dragging) return;
+    const x = e.touches[0].clientX - startX, y = e.touches[0].clientY - startY;
+    if (!locked) {
+      if (Math.abs(x) < 10 && Math.abs(y) < 10) return;
+      locked = Math.abs(x) > Math.abs(y) * 1.5;
+      if (!locked) { dragging = false; return; }
+    }
+  }, { passive: true });
+  app.addEventListener("touchend", (e) => {
+    if (!dragging || !locked) { dragging = false; return; }
+    const dx = e.changedTouches[0].clientX - startX;
+    dragging = false;
+    if (Math.abs(dx) < 60) return;
+    const idx = order.indexOf(state.tab);
+    if (idx === -1) return;
+    if (dx < 0 && idx < order.length - 1) setTab(order[idx+1]);
+    else if (dx > 0 && idx > 0) setTab(order[idx-1]);
+  });
+}
+function attachSwipeHandlers() {
+  document.querySelectorAll(".swipe-wrapper").forEach((wrapper) => {
+    const content = wrapper.querySelector(".swipe-content");
+    if (!content) return;
+    const id = wrapper.dataset.id, kind = wrapper.dataset.kind;
+    let startX = 0, startY = 0, dx = 0, dragging = false, locked = false;
+    content.addEventListener("touchstart", (e) => {
+      startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+      dragging = true; locked = false; dx = 0;
+      content.style.transition = "none";
+    }, { passive: true });
+    content.addEventListener("touchmove", (e) => {
+      if (!dragging) return;
+      const x = e.touches[0].clientX - startX, y = e.touches[0].clientY - startY;
+      if (!locked) { if (Math.abs(x) < 8 && Math.abs(y) < 8) return; locked = Math.abs(x) > Math.abs(y); if (!locked) { dragging = false; return; } }
+      dx = Math.max(-110, Math.min(110, x));
+      content.style.transform = `translateX(${dx}px)`;
+    }, { passive: true });
+    content.addEventListener("touchend", () => {
+      if (!dragging) return;
+      dragging = false;
+      content.style.transition = "transform 0.2s ease";
+      if (dx < -70) {
+        content.style.transform = "translateX(-100%)";
+        setTimeout(() => { kind === "expense" ? removeExpense(id) : removeIncome(id); }, 140);
+      } else if (dx > 70) {
+        content.style.transform = "translateX(0)";
+        kind === "expense" ? editExpense(id) : editIncome(id);
+      } else {
+        content.style.transform = "translateX(0)";
+      }
+      dx = 0;
+    });
+  });
+}
 function duplicateExpense(id) {
   const src = state.expenses.find(e => e.id === id);
   if (!src) return;
@@ -1109,6 +1296,15 @@ function duplicateExpense(id) {
   state.expenses.unshift({ ...src, id: uid(), date: new Date().toISOString().slice(0,10), recurringId: undefined });
   persistAll(); render();
   showToast("Įrašas nukopijuotas su šiandienos data");
+}
+function frequentCategoryChips() {
+  const counts = {};
+  state.expenses.slice(0, 200).forEach(e => { counts[e.category] = (counts[e.category]||0) + 1; });
+  const top = Object.keys(counts).sort((a,b) => counts[b]-counts[a]).slice(0, 3);
+  if (top.length === 0) return "";
+  return `<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+    ${top.map(c => `<button type="button" onclick="document.getElementById('f_category').value='${c}';" style="font-size:12px;padding:6px 10px;border-radius:14px;border:1px solid rgba(237,234,224,0.15);background:var(--surface);color:var(--paper);">${catEmoji(c)}${c}</button>`).join("")}
+  </div>`;
 }
 function setNecessity(val) {
   document.getElementById("f_necessity").value = val;
@@ -1190,6 +1386,235 @@ function renderReport() {
   return `<div class="tabpanel fade-in">${toggle}${renderMonthlyReport()}</div>`;
 }
 
+function amortizedPayment(principal, annualRatePct, years) {
+  const n = Math.round(years * 12);
+  const r = (annualRatePct / 100) / 12;
+  if (n <= 0) return 0;
+  if (r <= 0) return principal / n;
+  return principal * r * Math.pow(1+r, n) / (Math.pow(1+r, n) - 1);
+}
+function pctCheck(safe, text) {
+  return { tone: safe ? "ok" : "risk", text };
+}
+function evaluatePurchase(type, price, down, years, rate) {
+  const loanAmount = Math.max(0, price - down);
+  const monthly = amortizedPayment(loanAmount, rate, years);
+  const totalPaid = monthly * years * 12;
+  const totalInterest = Math.max(0, totalPaid - loanAmount);
+  const downPct = price > 0 ? (down / price) * 100 : 0;
+  const income = state.baseIncome;
+  const existingDebt = state.categories.filter(c => catType(c) === "loan")
+    .reduce((s, c) => s + (Number((state.categoryConfig[c]||{}).minPayment) || 0), 0);
+  const totalDebtAfter = existingDebt + monthly;
+
+  const checks = [];
+  if (!income || income <= 0) {
+    checks.push({ tone: "warn", text: "Nustatyk „Pajamų bazę“ Nustatymuose, kad gautum tikslų saugumo įvertinimą pagal pajamas." });
+  } else {
+    const monthlyPct = (monthly / income) * 100;
+    const totalDebtPct = (totalDebtAfter / income) * 100;
+    if (type === "car") {
+      checks.push(pctCheck(downPct >= 20, `Pradinis įnašas ${downPct.toFixed(0)}% (rekomenduojama bent 20%)`));
+      checks.push(pctCheck(years <= 4, `Paskolos terminas ${years} m. (rekomenduojama iki 4 m.)`));
+      checks.push(pctCheck(monthlyPct <= 10, `Įmoka ${monthlyPct.toFixed(1)}% pajamų (rekomenduojama iki 10%)`));
+    } else if (type === "house") {
+      checks.push(pctCheck(monthlyPct <= 28, `Būsto įmoka ${monthlyPct.toFixed(1)}% pajamų (rekomenduojama iki 28%)`));
+      checks.push(pctCheck(totalDebtPct <= 36, `Bendra skolų našta ${totalDebtPct.toFixed(1)}% pajamų (rekomenduojama iki 36%)`));
+    } else {
+      checks.push(pctCheck(totalDebtPct <= 30, `Bendra skolų našta ${totalDebtPct.toFixed(1)}% pajamų (dauguma rekomendacijų siūlo neviršyti 30%)`));
+    }
+  }
+  const verdict = checks.some(c => c.tone === "risk") ? "risk" : (checks.some(c => c.tone === "warn") ? "warn" : "ok");
+  return { loanAmount, monthly, totalPaid, totalInterest, checks, verdict };
+}
+function runCalculator() {
+  const type = document.getElementById("calc_type").value;
+  const price = parseFloat(String(document.getElementById("calc_price").value).replace(",",".")) || 0;
+  const down = parseFloat(String(document.getElementById("calc_down").value).replace(",",".")) || 0;
+  const years = parseFloat(String(document.getElementById("calc_years").value).replace(",",".")) || 0;
+  const rate = parseFloat(String(document.getElementById("calc_rate").value).replace(",",".")) || 0;
+  if (price <= 0 || years <= 0) { alert("Įvesk bent kainą ir laikotarpį metais."); return; }
+  state.calcResult = evaluatePurchase(type, price, down, years, rate);
+  state.calcType = type;
+  render();
+}
+function createLoanFromCalculator() {
+  const r = state.calcResult;
+  if (!r) return;
+  const defaultName = state.calcType === "car" ? "Automobilio paskola" : state.calcType === "house" ? "Būsto paskola" : "Nauja paskola";
+  const name = prompt("Kategorijos pavadinimas naujai paskolai:", defaultName);
+  if (!name) return;
+  addCategory(name, "loan", null, r.loanAmount, true, r.monthly);
+  state.calcResult = null;
+  state.tab = "settings";
+  render();
+  showToast("Paskolos kategorija sukurta Nustatymuose");
+}
+function toggleBudgetRule(ruleId) {
+  if (state.appliedRules[ruleId]) {
+    const snap = state.ruleSnapshots[ruleId];
+    if (snap) {
+      Object.keys(snap.budgets).forEach(c => { if (c in state.budgets || state.categories.includes(c)) state.budgets[c] = snap.budgets[c]; });
+    }
+    delete state.ruleSnapshots[ruleId];
+    state.appliedRules[ruleId] = false;
+    persistAll(); render();
+    showToast("Taisyklė atšaukta — grąžinta prie ankstesnio biudžeto");
+    return;
+  }
+  if (ruleId === "503020") {
+    const income = state.baseIncome;
+    if (!income || income <= 0) { alert("Pirma nustatyk „Pajamų bazę“ Nustatymuose."); return; }
+    const flexCats = state.categories.filter(c => catType(c) === "expense" && !isEssential(c));
+    const investCats = state.categories.filter(c => catType(c) === "investment");
+    const snapBudgets = {};
+    flexCats.forEach(c => snapBudgets[c] = state.budgets[c]);
+    if (investCats.length) snapBudgets[investCats[0]] = state.budgets[investCats[0]];
+    state.ruleSnapshots[ruleId] = { budgets: snapBudgets };
+    const idealWants = income * 0.3, idealSavings = income * 0.2;
+    const currentFlexTotal = flexCats.reduce((s,c) => s + (Number(state.budgets[c])||0), 0);
+    if (currentFlexTotal > 0) {
+      const factor = idealWants / currentFlexTotal;
+      flexCats.forEach(c => { state.budgets[c] = Math.round((Number(state.budgets[c])||0) * factor * 100) / 100; });
+    } else if (flexCats.length > 0) {
+      const each = idealWants / flexCats.length;
+      flexCats.forEach(c => { state.budgets[c] = Math.round(each * 100) / 100; });
+    }
+    if (investCats.length > 0) { state.budgets[investCats[0]] = Math.round(idealSavings * 100) / 100; }
+    state.appliedRules[ruleId] = true;
+    persistAll(); render();
+    showToast("50/30/20 pritaikyta lanksčioms kategorijoms");
+  }
+}
+
+function allTimeInvestedTotal() {
+  return state.categories.filter(c => catType(c) === "investment")
+    .reduce((s,c) => s + allTimePaidForCategory(c), 0);
+}
+function allTimeLoanRemainingTotal() {
+  return state.categories.filter(c => catType(c) === "loan")
+    .reduce((s,c) => s + loanRemaining(c), 0);
+}
+function computeCurrentNetWorth() {
+  const savings = state.savingsBalance;
+  const invested = allTimeInvestedTotal();
+  const loans = allTimeLoanRemainingTotal();
+  return { savings, invested, loans, netWorth: savings + invested - loans };
+}
+function recordNetWorthSnapshot() {
+  const monthKey = currentMonthKey();
+  const exists = state.netWorthHistory.some(h => h.monthKey === monthKey);
+  const nw = computeCurrentNetWorth();
+  if (exists) {
+    const h = state.netWorthHistory.find(h => h.monthKey === monthKey);
+    Object.assign(h, nw);
+  } else {
+    state.netWorthHistory.push({ monthKey, ...nw });
+    state.netWorthHistory.sort((a,b) => a.monthKey.localeCompare(b.monthKey));
+  }
+  save("netWorthHistory", state.netWorthHistory);
+}
+function netWorthTrendSVG() {
+  const points = state.netWorthHistory.slice(-12);
+  if (points.length < 2) {
+    return `<div style="font-size:12px;color:var(--faint);padding:20px 0;text-align:center;">Tendencija atsiras, kai turėsi bent 2 mėnesių įrašus. Grynasis turtas registruojamas automatiškai kas mėnesį nuo šiol.</div>`;
+  }
+  const values = points.map(p => p.netWorth);
+  const minVal = Math.min(0, ...values), maxVal = Math.max(1, ...values);
+  const range = maxVal - minVal || 1;
+  const w = 320, h = 140, padL = 44, padR = 10, padT = 12, padB = 20;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  function xAt(i) { return padL + (i / (points.length - 1)) * plotW; }
+  function yAt(v) { return padT + plotH - ((v - minVal) / range) * plotH; }
+  const pathPts = points.map((p,i) => `${xAt(i).toFixed(1)},${yAt(p.netWorth).toFixed(1)}`).join(" ");
+  const zeroY = yAt(0);
+  const labels = points.map((p,i) => {
+    if (points.length > 6 && i % 2 !== 0) return "";
+    const [,m] = p.monthKey.split("-");
+    return `<text x="${xAt(i).toFixed(1)}" y="${h-4}" fill="#8FA098" font-size="8" text-anchor="middle">${MONTH_NAMES[Number(m)-1].slice(0,3)}</text>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:150px;display:block;">
+    <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${w-padR}" y2="${zeroY.toFixed(1)}" stroke="rgba(237,234,224,0.15)" stroke-width="1"/>
+    <polyline points="${pathPts}" fill="none" stroke="#C9A227" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+    ${labels}
+    <text x="${padL-6}" y="${padT+4}" fill="#8FA098" font-size="8" text-anchor="end">€${Math.round(maxVal)}</text>
+  </svg>`;
+}
+
+function renderRules() {
+  const income = state.baseIncome;
+  const flexCats = state.categories.filter(c => catType(c) === "expense" && !isEssential(c));
+  const investCats = state.categories.filter(c => catType(c) === "investment");
+  const currentWants = flexCats.reduce((s,c) => s + (Number(state.budgets[c])||0), 0);
+  const currentSavings = investCats.reduce((s,c) => s + (Number(state.budgets[c])||0), 0);
+  const applied503020 = !!state.appliedRules["503020"];
+
+  const r = state.calcResult;
+  const verdictColor = t => t === "ok" ? "var(--green)" : t === "warn" ? "var(--gold)" : "var(--rust)";
+  const verdictLabel = t => t === "ok" ? "Atrodo saugu" : t === "warn" ? "Reikia daugiau info" : "Rizikinga";
+
+  return `<div class="topbar"><div class="eyebrow">Finansų taisyklės</div></div>
+  <div class="tabpanel fade-in">
+
+    <div class="section-label">Biudžeto taisyklės</div>
+    <div class="tip-card" style="border-left-color:var(--gold);">
+      <div style="display:flex;align-items:flex-start;gap:10px;">
+        <input type="checkbox" ${applied503020?'checked':''} onchange="toggleBudgetRule('503020')" style="margin-top:3px;" />
+        <div style="flex:1;">
+          <div style="font-weight:600;margin-bottom:4px;">50 / 30 / 20 taisyklė</div>
+          <div style="font-size:12px;color:var(--faint);margin-bottom:8px;">50% pajamų — būtinybėms, 30% — norams, 20% — taupymui. Pažymėjus varnelę, iškart perskirstomi „lanksčių" kategorijų biudžetai ir pirmos investicinės kategorijos tikslas. Atžymėjus — grąžinama kaip buvo.</div>
+          ${income > 0 ? `<div style="font-size:12px;">Norai dabar: €${fmt(currentWants)} (tikslas €${fmt(income*0.3)}) · Taupymas dabar: €${fmt(currentSavings)} (tikslas €${fmt(income*0.2)})</div>` : `<div style="font-size:12px;color:var(--rust);">Nustatyk Pajamų bazę Nustatymuose, kad veiktų.</div>`}
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label" style="margin-top:22px;">Didelio pirkinio taisyklės (informacija)</div>
+    <div class="tip-card" style="border-left-color:var(--blue);">
+      <div style="font-weight:600;margin-bottom:4px;">🚗 Automobilio pirkimas — „20/4/10"</div>
+      <div style="font-size:12px;color:var(--faint);">Pradinis įnašas bent <b>20%</b> kainos · paskolos terminas ne ilgiau <b>4 metų</b> · mėnesio įmoka ne daugiau <b>10%</b> tavo pajamų. Kuo naujesnis automobilis, tuo didesnis nuvertėjimas — šios ribos apsaugo nuo per didelio įsipareigojimo greitai vertę prarandančiam turtui.</div>
+    </div>
+    <div class="tip-card" style="border-left-color:var(--blue);">
+      <div style="font-weight:600;margin-bottom:4px;">🏠 Būsto pirkimas — „28/36"</div>
+      <div style="font-size:12px;color:var(--faint);">Būsto paskolos įmoka (kartu su draudimu) ne daugiau <b>28%</b> pajamų · visos skolos kartu (būstas + kitos paskolos) ne daugiau <b>36%</b> pajamų. Bankai dažnai naudoja panašius rodiklius vertindami, ar suteikti paskolą.</div>
+    </div>
+    <div class="tip-card" style="border-left-color:var(--blue);">
+      <div style="font-weight:600;margin-bottom:4px;">💳 Bendra skolų riba</div>
+      <div style="font-size:12px;color:var(--faint);">Visos mėnesio skolų įmokos kartu — geriausia neviršyti <b>30%</b> pajamų bet kokiam kitam pirkiniui ar paskolai (vartojimo kreditas, lizingas ir pan.).</div>
+    </div>
+
+    <div class="section-label" style="margin-top:22px;">Naujo pirkinio / paskolos skaičiuoklė</div>
+    <form class="stack" onsubmit="event.preventDefault(); runCalculator();">
+      <label class="field">Tipas
+        <select id="calc_type">
+          <option value="car" ${state.calcType==='car'?'selected':''}>Automobilis</option>
+          <option value="house" ${state.calcType==='house'?'selected':''}>Būstas</option>
+          <option value="other" ${state.calcType==='other'?'selected':''}>Kita (vartojimo kreditas ir pan.)</option>
+        </select>
+      </label>
+      <label class="field">Kaina (€)<input id="calc_price" type="text" inputmode="decimal" placeholder="pvz. 15000" /></label>
+      <label class="field">Pradinis įnašas (€)<input id="calc_down" type="text" inputmode="decimal" placeholder="pvz. 3000" /></label>
+      <div style="display:flex;gap:8px;">
+        <label class="field" style="flex:1;">Terminas (metais)<input id="calc_years" type="text" inputmode="decimal" placeholder="pvz. 4" /></label>
+        <label class="field" style="flex:1;">Metinė palūkana (%)<input id="calc_rate" type="text" inputmode="decimal" placeholder="pvz. 7" /></label>
+      </div>
+      <button type="submit" class="submit-btn" style="background:var(--blue);">Apskaičiuoti</button>
+    </form>
+
+    ${r ? `
+      <div class="tip-card" style="border-left-color:${verdictColor(r.verdict)};margin-top:14px;">
+        <div style="font-weight:700;color:${verdictColor(r.verdict)};margin-bottom:8px;">${verdictLabel(r.verdict)}</div>
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:13px;margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;"><span>Mėnesio įmoka</span><span class="tape">€${fmt(r.monthly)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Iš viso permokėsi (palūkanos)</span><span class="tape">€${fmt(r.totalInterest)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Visa kaina su palūkanomis</span><span class="tape">€${fmt(r.totalPaid)}</span></div>
+        </div>
+        ${r.checks.map(c => `<div class="insight" style="color:${verdictColor(c.tone)};margin-bottom:6px;">${c.tone==='ok'?ICONS.check:ICONS.alert}<span style="color:var(--paper);">${c.text}</span></div>`).join("")}
+        <button type="button" class="submit-btn" style="margin-top:8px;padding:9px 0;font-size:13px;" onclick="createLoanFromCalculator()">Sukurti kaip paskolos kategoriją</button>
+      </div>
+    ` : ""}
+  </div>`;
+}
+
 function yearData(year) {
   let incomeTotal = 0, spentTotal = 0, investedTotal = 0;
   const monthly = [];
@@ -1205,37 +1630,60 @@ function yearData(year) {
   return { incomeTotal, spentTotal, investedTotal, saved, monthly, monthlyFull };
 }
 
-function drawTrendChart(year) {
-  const canvas = document.getElementById("trendChart");
-  if (!canvas || typeof Chart === "undefined") return;
+function trendChartSVG(year) {
   const y = yearData(year);
-  if (state.trendChart) { state.trendChart.destroy(); state.trendChart = null; }
-  const labels = y.monthlyFull.map(m => MONTH_NAMES[Number(m.key.split("-")[1])-1].slice(0,3));
-  state.trendChart = new Chart(canvas, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        { label: "Pajamos", data: y.monthlyFull.map(m=>m.incomeTotal), borderColor: "#6FBF73", backgroundColor: "transparent", tension: 0.3, pointRadius: 2 },
-        { label: "Išleista", data: y.monthlyFull.map(m=>m.spentTotal), borderColor: "#D97742", backgroundColor: "transparent", tension: 0.3, pointRadius: 2 },
-        { label: "Investuota", data: y.monthlyFull.map(m=>m.investedTotal), borderColor: "#6FA3BF", backgroundColor: "transparent", tension: 0.3, pointRadius: 2 },
-      ]
-    },
-    options: {
-      plugins: { legend: { position: "bottom", labels: { color: "#8FA098", boxWidth: 10, font: { size: 10 } } }, tooltip: { callbacks: { label: (ctx) => ` ${ctx.dataset.label}: €${fmt(ctx.raw)}` } } },
-      scales: {
-        x: { ticks: { color: "#8FA098", font: { size: 10 } }, grid: { display: false } },
-        y: { ticks: { color: "#8FA098", font: { size: 10 } }, grid: { color: "rgba(237,234,224,0.08)" } },
-      }
-    }
-  });
+  const series = [
+    { key: "incomeTotal", color: "#6FBF73", label: "Pajamos" },
+    { key: "spentTotal", color: "#D97742", label: "Išleista" },
+    { key: "investedTotal", color: "#6FA3BF", label: "Investuota" },
+  ];
+  const values = y.monthlyFull.flatMap(m => series.map(s => m[s.key]));
+  const maxVal = Math.max(1, ...values);
+  const w = 320, h = 160, padL = 40, padR = 10, padT = 12, padB = 22;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  const n = 12;
+  function xAt(i) { return padL + (i / (n - 1)) * plotW; }
+  function yAt(v) { return padT + plotH - (v / maxVal) * plotH; }
+  const paths = series.map(s => {
+    const pts = y.monthlyFull.map((m, i) => `${xAt(i).toFixed(1)},${yAt(m[s.key]).toFixed(1)}`).join(" ");
+    return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join("");
+  const gridLines = [0, 0.5, 1].map(f => {
+    const yy = padT + plotH * (1 - f);
+    return `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${w-padR}" y2="${yy.toFixed(1)}" stroke="rgba(237,234,224,0.08)" stroke-width="1"/>`;
+  }).join("");
+  const labels = y.monthlyFull.map((m, i) => {
+    if (i % 2 !== 0) return "";
+    const name = MONTH_NAMES[Number(m.key.split("-")[1])-1].slice(0, 3);
+    return `<text x="${xAt(i).toFixed(1)}" y="${h-4}" fill="#8FA098" font-size="8" text-anchor="middle">${name}</text>`;
+  }).join("");
+  const yLabelMax = `<text x="${padL-6}" y="${padT+4}" fill="#8FA098" font-size="8" text-anchor="end">€${Math.round(maxVal)}</text>`;
+  return `
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:180px;display:block;font-family:'IBM Plex Sans',sans-serif;">
+      ${gridLines}${paths}${labels}${yLabelMax}
+    </svg>
+    <div class="legend" style="margin-top:4px;">
+      ${series.map(s => `<span><span class="legend-dot" style="background:${s.color}"></span>${s.label}</span>`).join("")}
+    </div>`;
 }
 
 function renderYearlyReport() {
   const year = state.reportYear;
   const y = yearData(year);
   const canGoForward = year < new Date().getFullYear();
+  const nw = computeCurrentNetWorth();
+  const netWorthSection = `
+    <div class="section-label">Grynasis turtas (dabar)</div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-label">Santaupos</div><div class="tape stat-value" style="color:var(--gold)">€${fmt(nw.savings)}</div></div>
+      <div class="stat-card"><div class="stat-label">Investuota (visą laiką)</div><div class="tape stat-value" style="color:var(--blue)">€${fmt(nw.invested)}</div></div>
+      <div class="stat-card"><div class="stat-label">Skolos (liko)</div><div class="tape stat-value" style="color:var(--rust)">€${fmt(nw.loans)}</div></div>
+      <div class="stat-card"><div class="stat-label">Grynasis turtas</div><div class="tape stat-value" style="color:${nw.netWorth>=0?'var(--green)':'var(--rust)'}">€${fmt(nw.netWorth)}</div></div>
+    </div>
+    <div style="margin-bottom:20px;">${netWorthTrendSVG()}</div>
+  `;
   return `
+    ${netWorthSection}
     <div class="report-month-nav">
       <button class="nav-btn" onclick="state.reportYear--;render();" aria-label="Ankstesni metai">${ICONS.chevronLeft}</button>
       <div class="display" style="font-size:17px;font-weight:600;">${year}</div>
@@ -1249,7 +1697,7 @@ function renderYearlyReport() {
       <div class="stat-card"><div class="stat-label">${y.saved>=0?'Sutaupyta':'Trūkumas'}</div><div class="tape stat-value" style="color:${y.saved>=0?'var(--green)':'var(--rust)'}">€${fmt(Math.abs(y.saved))}</div></div>
     </div>
     <div class="section-label">Tendencija per metus</div>
-    <div style="height:200px;margin-bottom:20px;"><canvas id="trendChart"></canvas></div>
+    <div style="margin-bottom:20px;">${trendChartSVG(year)}</div>
     <div class="section-label">Mėnesiai su duomenimis</div>
     ${y.monthly.map(m => `<div class="ledger-row" style="display:flex;justify-content:space-between;padding:8px 0;font-size:13px;">
       <span>${monthLabel(m.key)}</span>
@@ -1343,7 +1791,8 @@ function renderSettings() {
           }
         ` : isLoan ? `
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.loanTotal ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','loanTotal', this.value)" /><span style="font-size:11px;color:var(--faint);">bendra paskolos suma</span></div>
-          <div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.minPayment ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','minPayment', this.value)" /><span style="font-size:11px;color:var(--faint);">minimali mėn. įmoka</span></div>
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.minPayment ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','minPayment', this.value)" /><span style="font-size:11px;color:var(--faint);">minimali mėn. įmoka</span></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="text" inputmode="decimal" value="${cfg.interestRate ?? ''}" style="max-width:70px;" onchange="updateCategoryGoal('${c}','interestRate', this.value)" /><span style="font-size:11px;color:var(--faint);">% metinė palūkana (nebūtina, reikia „Lavinos" strategijai)</span></div>
           <div style="font-size:11px;color:var(--faint);margin-top:4px;">Sumokėta iki šiol: €${fmt(allTimePaidForCategory(c))} · Liko: €${fmt(loanRemaining(c))}</div>
         ` : `
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">biudžetas / mėn.</span></div>
@@ -1357,10 +1806,10 @@ function renderSettings() {
       ? `<span class="cat-tag" style="color:var(--blue);border-color:var(--blue);margin-right:6px;">Paskola</span><span class="tape" style="font-size:13px;color:var(--faint);">liko €${fmt(loanRemaining(c))}</span>`
       : `<span class="cat-tag" style="${isEssential(c) ? '' : 'border-color:var(--gold);color:var(--gold);'}margin-right:6px;">${isEssential(c) ? 'būtina' : 'lanksti'}</span><span class="tape" style="font-size:13px;color:var(--faint);">€${fmt(state.budgets[c]||0)}</span>`;
     return `<div class="settings-row ledger-row">
-      <div style="display:flex;flex-direction:column;gap:0;flex-shrink:0;">
+      ${state.reorderingCategories ? `<div style="display:flex;flex-direction:column;gap:0;flex-shrink:0;">
         <button class="icon-btn" style="padding:1px;${idx===0?'opacity:.25':''}" ${idx===0?'disabled':''} onclick="moveCategory('${c}',-1)" aria-label="Aukštyn">▲</button>
         <button class="icon-btn" style="padding:1px;${idx===state.categories.length-1?'opacity:.25':''}" ${idx===state.categories.length-1?'disabled':''} onclick="moveCategory('${c}',1)" aria-label="Žemyn">▼</button>
-      </div>
+      </div>` : ""}
       <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;">
         <span style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${catEmoji(c)}${c}</span>
         <button class="icon-btn" onclick="state.editingCategory='${c}';render();" aria-label="Redaguoti ${c}">${ICONS.pencil}</button>
@@ -1409,7 +1858,10 @@ function renderSettings() {
     <button class="icon-btn" onclick="state.showHelp=true;render();" aria-label="Pagalba" style="border:1px solid rgba(237,234,224,0.15);border-radius:50%;width:26px;height:26px;justify-content:center;">?</button>
   </div>
   <div class="tabpanel fade-in">
-    <div class="section-label">Kategorijos</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div class="section-label" style="margin-bottom:0;">Kategorijos</div>
+      <button type="button" onclick="state.reorderingCategories=!state.reorderingCategories;render();" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.reorderingCategories?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.reorderingCategories?'rgba(201,162,39,0.12)':'transparent'};color:${state.reorderingCategories?'var(--gold)':'var(--faint)'};">${state.reorderingCategories?'Baigta':'Tvarkyti'}</button>
+    </div>
     ${rows}
     <form class="stack" style="margin-top:16px;" onsubmit="return submitAddCategory(event)">
       <label class="field">Nauja kategorija<input id="new_cat" type="text" placeholder="pvz. Investicijos, Kelionės" /></label>
@@ -1574,7 +2026,7 @@ function exportData() {
     categories: state.categories, categoryConfig: state.categoryConfig,
     baseIncome: state.baseIncome, gaugeStyle: state.gaugeStyle, theme: state.theme,
     recurringTemplates: state.recurringTemplates, budgetStartDay: state.budgetStartDay,
-    merchantMap: state.merchantMap, importedHashes: state.importedHashes, savingsBalance: state.savingsBalance, exportedAt: new Date().toISOString(),
+    merchantMap: state.merchantMap, importedHashes: state.importedHashes, savingsBalance: state.savingsBalance, netWorthHistory: state.netWorthHistory, exportedAt: new Date().toISOString(),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -1605,6 +2057,7 @@ function importDataFile(input) {
       if (data.merchantMap) state.merchantMap = data.merchantMap;
       if (data.importedHashes) state.importedHashes = data.importedHashes;
       if (typeof data.savingsBalance === "number") state.savingsBalance = data.savingsBalance;
+      if (data.netWorthHistory) state.netWorthHistory = data.netWorthHistory;
       persistAll();
       applyTheme();
       render();
@@ -1777,6 +2230,7 @@ function render() {
   if (state.tab === "overview") body = renderOverview();
   else if (state.tab === "add") body = renderAdd();
   else if (state.tab === "report") body = renderReport();
+  else if (state.tab === "rules") body = renderRules();
   else if (state.tab === "settings") body = renderSettings();
 
   app.innerHTML = body + `
@@ -1784,11 +2238,12 @@ function render() {
       <button class="nav-item ${state.tab==='overview'?'active':''}" onclick="setTab('overview')">${ICONS.wallet}Apžvalga</button>
       <button class="nav-item ${state.tab==='add'?'active':''}" onclick="setTab('add')">${ICONS.plus}Pridėti</button>
       <button class="nav-item ${state.tab==='report'?'active':''}" onclick="setTab('report')">${ICONS.file}Ataskaita</button>
+      <button class="nav-item ${state.tab==='rules'?'active':''}" onclick="setTab('rules')">${ICONS.rules}Taisyklės</button>
       <button class="nav-item ${state.tab==='settings'?'active':''}" onclick="setTab('settings')">${ICONS.settings}Nustatymai</button>
     </div>`;
 
-  if (state.tab === "overview" && state.gaugeStyle !== "fuel") drawChart();
-  if (state.tab === "report" && state.reportMode === "year") drawTrendChart(state.reportYear);
+  if (state.tab === "overview") attachSwipeHandlers();
+  attachTabSwipe();
   if (state._focusSearch) {
     const si = document.getElementById("search_input");
     if (si) { si.focus(); const len = si.value.length; si.setSelectionRange(len, len); }
@@ -1804,8 +2259,10 @@ function setTab(t) {
 
 applyTheme();
 applyRecurringTemplates();
+recordNetWorthSnapshot();
 if (state.appPin) state.appLocked = true;
 render();
+window.scrollTo(0, 0);
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && state.appPin) {
