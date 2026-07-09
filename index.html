@@ -168,10 +168,70 @@ const STARTER_MERCHANTS = [
   { keywords: ["IKEA", "JYSK", "SENUKAI"], category: "Namai / Sąskaitos" },
 ];
 
-function load(key, fallback) {
-  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (_) { return fallback; }
+// --- Storage: IndexedDB-backed (falls back to localStorage if IndexedDB unavailable) ---
+// load() stays synchronous and only returns the fallback — real persisted values are
+// applied to `state` asynchronously at startup via loadAllFromIDB(), after which every
+// subsequent save() writes straight to IndexedDB in the background.
+const DB_NAME = "biudzetasDB", DB_STORE = "kv";
+let idbAvailable = typeof indexedDB !== "undefined";
+let idbInstance = null;
+function idbOpen() {
+  if (idbInstance) return Promise.resolve(idbInstance);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains(DB_STORE)) req.result.createObjectStore(DB_STORE); };
+    req.onsuccess = () => { idbInstance = req.result; resolve(idbInstance); };
+    req.onerror = () => reject(req.error);
+  });
 }
-function save(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
+async function idbGetAll() {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, "readonly");
+    const store = tx.objectStore(DB_STORE);
+    const keysReq = store.getAllKeys(), valsReq = store.getAll();
+    tx.oncomplete = () => {
+      const obj = {};
+      keysReq.result.forEach((k, i) => obj[k] = valsReq.result[i]);
+      resolve(obj);
+    };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbSet(key, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    tx.objectStore(DB_STORE).put(value, key);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function migrateLocalStorageToIDB() {
+  const existing = await idbGetAll();
+  if (existing.__migrated__) return;
+  const db = await idbOpen();
+  await new Promise((resolve) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    const store = tx.objectStore(DB_STORE);
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      try { store.put(JSON.parse(localStorage.getItem(key)), key); } catch (_) {}
+    }
+    store.put(true, "__migrated__");
+    tx.oncomplete = resolve; tx.onerror = resolve;
+  });
+}
+
+function load(key, fallback) { return fallback; }
+function save(key, value) {
+  if (idbAvailable) {
+    idbSet(key, value).catch(() => { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} });
+  } else {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+  }
+}
 
 function normalizeMerchant(raw) {
   return (raw || "")
@@ -276,9 +336,31 @@ let state = {
   importMapping: { dateCol: null, amountCol: null, descCol: null, allExpense: false },
   importDrafts: [],
   importFile: null,
+  csvMappingMemory: load("csvMappingMemory", {}),
+  holdings: load("holdings", []),
+  finnhubApiKey: load("finnhubApiKey", ""),
+  priceRefreshing: false,
+  editingHoldingId: null,
+  cryptoHoldings: load("cryptoHoldings", []),
+  editingCryptoId: null,
+  cryptoPriceRefreshing: false,
+  // ===== Individualios veiklos mokesčių skaičiuoklė — laikina, neišsaugoma būsena (lengva pašalinti) =====
+  taxCalc: { income: "", method: "30pct", actualExpenses: "", otherIncome: "", insuredElsewhere: false, firstYearRelief: false },
+  taxCalcResult: null,
+  detectedSubscriptions: [],
+  portfolioImportStep: null,
+  portfolioImportRaw: null,
+  portfolioImportMapping: { symbolCol: null, qtyCol: null, amountCol: null, priceCol: null, actionCol: null, amountMode: "total" },
+  portfolioImportDrafts: [],
+  portfolioImportMode: "replace",
+  portfolioImportFile: null,
+  portfolioImportSkipped: 0,
+  importHeaderSig: null,
   importSkippedInfo: null,
   showHelp: false,
   editingRecurringId: null,
+  recurringIncomes: load("recurringIncomes", []),
+  editingRecurringIncomeId: null,
   reorderingCategories: false,
   debtStrategy: load("debtStrategy", "snowball"),
   appliedRules: load("appliedRules", {}),
@@ -305,8 +387,6 @@ let state = {
   chart: null,
   trendChart: null,
 };
-state.categories.forEach(c => { if (!state.categoryConfig[c]) state.categoryConfig[c] = { type: "expense", essential: true }; });
-state.reportCursor = currentMonthKey();
 
 function fmt(n) { return (Math.round(n * 100) / 100).toFixed(2).replace(".", ","); }
 function escapeHtml(str) {
@@ -334,6 +414,7 @@ function persistAll() {
   save("recurringTemplates", state.recurringTemplates);
   save("budgetStartDay", state.budgetStartDay);
   save("appPin", state.appPin);
+  save("recurringIncomes", state.recurringIncomes);
   save("savingsBalance", state.savingsBalance);
   save("savingsGoalMin", state.savingsGoalMin);
   save("savingsLog", state.savingsLog);
@@ -533,6 +614,27 @@ function updateCategoryGoal(name, field, val) {
   persistAll(); render();
 }
 function updateBudget(c, val) { state.budgets[c] = parseFloat(String(val).replace(",",".")) || 0; persistAll(); }
+function updateCategoryTargetDate(name, val) {
+  if (!state.categoryConfig[name]) state.categoryConfig[name] = {};
+  state.categoryConfig[name].targetDate = val;
+  persistAll(); render();
+}
+function updateCategoryTargetAmount(name, val) {
+  if (!state.categoryConfig[name]) state.categoryConfig[name] = {};
+  state.categoryConfig[name].targetAmount = parseFloat(String(val).replace(",",".")) || 0;
+  persistAll(); render();
+}
+function requiredMonthlyForGoal(c) {
+  const cfg = state.categoryConfig[c] || {};
+  if (!cfg.targetDate || !cfg.targetAmount) return null;
+  const target = new Date(cfg.targetDate + "T00:00:00");
+  const today = new Date();
+  let months = (target.getFullYear() - today.getFullYear()) * 12 + (target.getMonth() - today.getMonth());
+  months = Math.max(1, months);
+  const already = allTimePaidForCategory(c);
+  const remaining = Math.max(0, cfg.targetAmount - already);
+  return { monthly: remaining / months, months, remaining, targetAmount: cfg.targetAmount };
+}
 function updateBaseIncome(val) { state.baseIncome = parseFloat(String(val).replace(",",".")) || 0; persistAll(); render(); }
 function updateSavingsBalance(val) {
   const newVal = parseFloat(String(val).replace(",",".")) || 0;
@@ -609,7 +711,9 @@ function processCsvText(text) {
     const dataRows = allRows.slice(headerIdx + 1);
     if (dataRows.length === 0) { alert("Faile nerasta duomenų eilučių (rasta tik " + allRows.length + " eilutė(-ių) iš viso)."); return; }
     state.importRaw = { headers, dataRows, skippedRows: headerIdx };
-    state.importMapping = {
+    const sig = headers.join("|").toLowerCase();
+    const remembered = state.csvMappingMemory[sig];
+    state.importMapping = remembered ? { ...remembered } : {
       dateCol: guessColumn(headers, ["data", "date"]),
       amountCol: guessColumn(headers, ["suma", "amount", "value"], ["likutis", "balance"]),
       descCol: guessColumn(headers, ["gavėjas", "gavejas", "aprašymas", "aprasymas", "description", "payee", "detalės", "detales", "mokėjimo paskirtis", "paskirtis"]),
@@ -617,6 +721,7 @@ function processCsvText(text) {
       statusCol: guessColumn(headers, ["state", "statusas", "būsena", "busena"]),
       allExpense: false,
     };
+    state.importHeaderSig = sig;
     state.importStep = "mapping";
     render();
   } catch (err) {
@@ -652,6 +757,10 @@ function proceedToReview() {
     const { headers, dataRows } = state.importRaw;
     const { dateCol, amountCol, descCol, currencyCol, statusCol, allExpense } = state.importMapping;
     if (dateCol === null || amountCol === null) { alert("Pasirink bent datos ir sumos stulpelius."); return; }
+    if (state.importHeaderSig) {
+      state.csvMappingMemory[state.importHeaderSig] = { dateCol, amountCol, descCol, currencyCol, statusCol, allExpense };
+      save("csvMappingMemory", state.csvMappingMemory);
+    }
     const drafts = [];
     let skippedCurrency = 0, skippedStatus = 0;
     dataRows.forEach((row) => {
@@ -722,6 +831,50 @@ function cancelImport() {
   state.importStep = null; state.importRaw = null; state.importDrafts = []; state.importFile = null; state.importSkippedInfo = null;
   render();
 }
+function detectRecurringCandidates() {
+  const groups = {};
+  state.expenses.forEach(e => {
+    if (e.recurringId) return;
+    const bucket = Math.round(Number(e.amount));
+    const key = e.category + "|" + bucket;
+    if (!groups[key]) groups[key] = { category: e.category, amounts: [], months: new Set(), entries: [] };
+    groups[key].amounts.push(Number(e.amount));
+    groups[key].months.add(budgetMonthKeyForDate(e.date));
+    groups[key].entries.push(e);
+  });
+  const candidates = [];
+  Object.values(groups).forEach(g => {
+    if (g.months.size >= 3) {
+      const avgAmount = Math.round((g.amounts.reduce((s,a)=>s+a,0) / g.amounts.length) * 100) / 100;
+      const alreadyTemplated = state.recurringTemplates.some(t => t.category === g.category && Math.abs(t.amount - avgAmount) < 1);
+      if (!alreadyTemplated) {
+        const latest = [...g.entries].sort((a,b) => b.date.localeCompare(a.date))[0];
+        candidates.push({ category: g.category, amount: avgAmount, months: g.months.size, note: latest.note || "", entries: g.entries });
+      }
+    }
+  });
+  return candidates.sort((a,b) => b.months - a.months);
+}
+function runSubscriptionScan() {
+  state.detectedSubscriptions = detectRecurringCandidates();
+  render();
+}
+function convertDetectedToRecurring(idx) {
+  const c = state.detectedSubscriptions[idx];
+  if (!c) return;
+  addRecurringTemplate(c.amount, c.category, c.note, "reikalinga");
+  const newTemplate = state.recurringTemplates[state.recurringTemplates.length - 1];
+  const thisMonthKey = currentMonthKey();
+  const recent = c.entries.find(e => budgetMonthKeyForDate(e.date) === thisMonthKey);
+  if (recent) { recent.recurringId = newTemplate.id; persistAll(); }
+  state.detectedSubscriptions.splice(idx, 1);
+  render();
+  showToast(`„${c.category}“ (€${fmt(c.amount)}) pridėta prie pasikartojančių išlaidų`);
+}
+function dismissDetectedSubscription(idx) {
+  state.detectedSubscriptions.splice(idx, 1);
+  render();
+}
 function addRecurringTemplate(amount, category, note, necessity) {
   const amt = parseFloat(String(amount).replace(",", "."));
   if (!amt || amt <= 0) return;
@@ -758,6 +911,42 @@ function applyRecurringTemplates() {
     }
   });
   if (changed) save("expenses", state.expenses);
+}
+function addRecurringIncome(amount, label) {
+  const amt = parseFloat(String(amount).replace(",", "."));
+  if (!amt || amt <= 0) return;
+  state.recurringIncomes.push({ id: uid(), amount: amt, label: (label||"Pajamos").trim() });
+  applyRecurringIncomes();
+  persistAll(); render();
+}
+function deleteRecurringIncome(id) {
+  if (!confirm("Ištrinti šią pasikartojančią pajamą? Jau įrašyti šio mėnesio įrašai liks.")) return;
+  state.recurringIncomes = state.recurringIncomes.filter(t => t.id !== id);
+  persistAll(); render();
+}
+function confirmEditRecurringIncome(id) {
+  const t = state.recurringIncomes.find(x => x.id === id);
+  if (!t) return;
+  const amount = parseFloat(document.getElementById("recinc_edit_amount").value.replace(",", "."));
+  if (!amount || amount <= 0) { alert("Įvesk teisingą sumą."); return; }
+  t.amount = amount;
+  t.label = document.getElementById("recinc_edit_label").value.trim() || "Pajamos";
+  state.editingRecurringIncomeId = null;
+  persistAll(); render();
+  showToast("Pasikartojanti pajama atnaujinta");
+}
+function applyRecurringIncomes() {
+  const monthKey = currentMonthKey();
+  const startDateStr = budgetMonthStartDateStr(monthKey, "budget");
+  let changed = false;
+  state.recurringIncomes.forEach(t => {
+    const exists = state.incomes.some(i => i.recurringId === t.id && budgetMonthKeyForDate(i.date) === monthKey);
+    if (!exists) {
+      state.incomes.unshift({ id: uid(), amount: t.amount, label: t.label, date: startDateStr, recurringId: t.id });
+      changed = true;
+    }
+  });
+  if (changed) save("incomes", state.incomes);
 }
 let lastDeleted = null;
 function removeExpense(id) {
@@ -919,6 +1108,26 @@ function allTimePaidForCategory(c) {
 }
 function loanTotalFor(c) { return (state.categoryConfig[c] && Number(state.categoryConfig[c].loanTotal)) || 0; }
 function loanRemaining(c) { return Math.max(0, loanTotalFor(c) - allTimePaidForCategory(c)); }
+function loanPayoffProjection(c) {
+  const remaining = loanRemaining(c);
+  const minPay = Number((state.categoryConfig[c]||{}).minPayment) || 0;
+  const annualRate = Number((state.categoryConfig[c]||{}).interestRate) || 0;
+  if (remaining <= 0) return { months: 0, date: null, neverPaysOff: false };
+  if (minPay <= 0) return { months: null, date: null, neverPaysOff: false };
+  const r = (annualRate / 100) / 12;
+  let months;
+  if (r <= 0) {
+    months = remaining / minPay;
+  } else {
+    const monthlyInterest = remaining * r;
+    if (minPay <= monthlyInterest) return { months: null, date: null, neverPaysOff: true };
+    months = -Math.log(1 - (r * remaining) / minPay) / Math.log(1 + r);
+  }
+  months = Math.ceil(months);
+  const d = new Date();
+  d.setMonth(d.getMonth() + months);
+  return { months, date: d, neverPaysOff: false };
+}
 
 function catRow(c, monthKey, d, mode, clickable) {
   const spent = d.byCategory[c]||0;
@@ -932,6 +1141,10 @@ function catRow(c, monthKey, d, mode, clickable) {
     color = statusColorInvestment(spent, target);
     pct = target > 0 ? Math.min(100, (spent/target)*100) : (spent>0?100:0);
     amountLabel = target > 0 ? `€${fmt(spent)} iš €${fmt(target)}` : `€${fmt(spent)}`;
+    if (isSavingsGoal) {
+      const proj = requiredMonthlyForGoal(c);
+      if (proj) subLine = `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Tikslas €${fmt(proj.targetAmount)} · reikia €${fmt(proj.monthly)}/mėn. (${proj.months} mėn. liko)</div>`;
+    }
   } else if (isLoan) {
     const total = loanTotalFor(c);
     const minPay = d.loanMinPayment(c);
@@ -939,7 +1152,12 @@ function catRow(c, monthKey, d, mode, clickable) {
     color = statusColorLoan(spent, minPay);
     pct = minPay > 0 ? Math.min(100, (spent/minPay)*100) : (spent>0?100:0);
     amountLabel = minPay > 0 ? `€${fmt(spent)} / €${fmt(minPay)} įmoka` : `€${fmt(spent)} šį mėn.`;
-    subLine = total > 0 ? `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Bendras likutis: €${fmt(remaining)} iš €${fmt(total)}</div>` : "";
+    subLine = total > 0 ? `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Bendras likutis: €${fmt(remaining)} iš €${fmt(total)}${(() => {
+      const proj = loanPayoffProjection(c);
+      if (proj.neverPaysOff) return ` · <span style="color:var(--rust)">įmoka nepadengia palūkanų</span>`;
+      if (proj.date) return ` · be skolos apie ${MONTH_NAMES[proj.date.getMonth()]} ${proj.date.getFullYear()}`;
+      return "";
+    })()}</div>` : "";
   } else {
     const budget = effectiveBudget(c, monthKey, mode);
     color = statusColorExpense(spent, budget);
@@ -1522,12 +1740,229 @@ function allTimeLoanRemainingTotal() {
   return state.categories.filter(c => catType(c) === "loan")
     .reduce((s,c) => s + loanRemaining(c), 0);
 }
+function addHolding(ticker, units, invested) {
+  const sym = String(ticker||"").trim().toUpperCase();
+  const u = parseFloat(String(units).replace(",",".")) || 0;
+  const inv = parseFloat(String(invested).replace(",",".")) || 0;
+  if (!sym || u <= 0) { alert("Įvesk tikslą ir teigiamą vienetų skaičių."); return; }
+  const existing = state.holdings.find(h => h.ticker === sym);
+  if (existing) { existing.units += u; existing.invested += inv; }
+  else state.holdings.push({ id: uid(), ticker: sym, units: u, invested: inv, lastPrice: null, lastPriceAt: null, priceError: null });
+  persistAll(); render();
+  showToast(`„${sym}“ pridėtas/atnaujintas`);
+}
+function deleteHolding(id) {
+  if (!confirm("Ištrinti šį laikymą?")) return;
+  state.holdings = state.holdings.filter(h => h.id !== id);
+  persistAll(); render();
+}
+function confirmEditHolding(id) {
+  const h = state.holdings.find(x => x.id === id);
+  if (!h) return;
+  const units = parseFloat(document.getElementById("hold_edit_units").value.replace(",",".")) || 0;
+  const invested = parseFloat(document.getElementById("hold_edit_invested").value.replace(",",".")) || 0;
+  if (units <= 0) { alert("Vienetų skaičius turi būti teigiamas."); return; }
+  h.units = units; h.invested = invested;
+  state.editingHoldingId = null;
+  persistAll(); render();
+}
+function updateFinnhubKey(val) { state.finnhubApiKey = val.trim(); persistAll(); }
+async function refreshHoldingPrices() {
+  if (!state.finnhubApiKey) { alert("Pirma įvesk Finnhub API raktą Nustatymuose (nemokamas, gaunamas per finnhub.io)."); return; }
+  if (state.holdings.length === 0) return;
+  state.priceRefreshing = true; render();
+  for (const h of state.holdings) {
+    try {
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(h.ticker)}&token=${encodeURIComponent(state.finnhubApiKey)}`);
+      if (!res.ok) { h.priceError = res.status === 401 ? "Neteisingas API raktas." : res.status === 429 ? "Viršytas užklausų limitas — pabandyk vėliau." : `Klaida (HTTP ${res.status})`; continue; }
+      const data = await res.json();
+      if (data && typeof data.c === "number" && data.c > 0) {
+        h.lastPrice = data.c; h.lastPriceAt = new Date().toISOString(); h.priceError = null;
+      } else {
+        h.priceError = "Tikslas nerastas arba be kainos duomenų.";
+      }
+    } catch (err) {
+      h.priceError = "Nepavyko prisijungti prie Finnhub.";
+    }
+  }
+  state.priceRefreshing = false;
+  persistAll(); render();
+  showToast("Kainos atnaujintos");
+}
+function addCryptoHolding(coinId, units, invested) {
+  const id = String(coinId||"").trim().toLowerCase();
+  const u = parseFloat(String(units).replace(",",".")) || 0;
+  const inv = parseFloat(String(invested).replace(",",".")) || 0;
+  if (!id || u <= 0) { alert("Įvesk CoinGecko ID (pvz. bitcoin) ir teigiamą vienetų skaičių."); return; }
+  const existing = state.cryptoHoldings.find(h => h.coinId === id);
+  if (existing) { existing.units += u; existing.invested += inv; }
+  else state.cryptoHoldings.push({ id: uid(), coinId: id, units: u, invested: inv, lastPrice: null, lastPriceAt: null, priceError: null });
+  persistAll(); render();
+  showToast(`„${id}“ pridėtas/atnaujintas`);
+}
+function deleteCryptoHolding(id) {
+  if (!confirm("Ištrinti šį laikymą?")) return;
+  state.cryptoHoldings = state.cryptoHoldings.filter(h => h.id !== id);
+  persistAll(); render();
+}
+function confirmEditCryptoHolding(id) {
+  const h = state.cryptoHoldings.find(x => x.id === id);
+  if (!h) return;
+  const units = parseFloat(document.getElementById("crypto_edit_units").value.replace(",",".")) || 0;
+  const invested = parseFloat(document.getElementById("crypto_edit_invested").value.replace(",",".")) || 0;
+  if (units <= 0) { alert("Vienetų skaičius turi būti teigiamas."); return; }
+  h.units = units; h.invested = invested;
+  state.editingCryptoId = null;
+  persistAll(); render();
+}
+async function refreshCryptoPrices() {
+  if (state.cryptoHoldings.length === 0) return;
+  state.cryptoPriceRefreshing = true; render();
+  try {
+    const ids = state.cryptoHoldings.map(h => encodeURIComponent(h.coinId)).join(",");
+    const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=eur`);
+    if (!res.ok) {
+      const msg = res.status === 429 ? "Viršytas užklausų limitas — pabandyk po minutės." : `Klaida (HTTP ${res.status})`;
+      state.cryptoHoldings.forEach(h => h.priceError = msg);
+    } else {
+      const data = await res.json();
+      state.cryptoHoldings.forEach(h => {
+        const entry = data[h.coinId];
+        if (entry && typeof entry.eur === "number") {
+          h.lastPrice = entry.eur; h.lastPriceAt = new Date().toISOString(); h.priceError = null;
+        } else {
+          h.priceError = "CoinGecko ID nerastas — patikrink rašybą (pvz. „bitcoin“, ne „BTC“).";
+        }
+      });
+    }
+  } catch (err) {
+    state.cryptoHoldings.forEach(h => h.priceError = "Nepavyko prisijungti prie CoinGecko.");
+  }
+  state.cryptoPriceRefreshing = false;
+  persistAll(); render();
+  showToast("Kripto kainos atnaujintos");
+}
+function cryptoPortfolioValue() {
+  return state.cryptoHoldings.reduce((s,h) => s + (h.lastPrice ? h.units * h.lastPrice : h.invested), 0);
+}
+
+function portfolioCurrentValue() {
+  return state.holdings.reduce((s,h) => s + (h.lastPrice ? h.units * h.lastPrice : h.invested), 0);
+}
+function portfolioInvestedTotal() {
+  return state.holdings.reduce((s,h) => s + h.invested, 0);
+}
+
+// --- Broker CSV import (groups transactions per ticker into running totals) ---
+function handlePortfolioCsvFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) { alert("Failas nepasirinktas. Patikrink, ar failo pavadinimas tikrai baigiasi .csv."); return; }
+  state.portfolioImportFile = file;
+  const reader = new FileReader();
+  reader.onload = (e) => processPortfolioCsvText(e.target.result);
+  reader.onerror = () => alert("Nepavyko perskaityti failo: " + reader.error);
+  reader.readAsText(file, "UTF-8");
+}
+function processPortfolioCsvText(text) {
+  try {
+    const allRows = parseCSV(text);
+    if (!allRows || allRows.length === 0) { alert("Failas tuščias arba nepavyko perskaityti."); return; }
+    const headerIdx = findHeaderRowIndex(allRows);
+    const headers = allRows[headerIdx];
+    const dataRows = allRows.slice(headerIdx + 1);
+    if (dataRows.length === 0) { alert("Faile nerasta duomenų eilučių."); return; }
+    state.portfolioImportRaw = { headers, dataRows };
+    state.portfolioImportMapping = {
+      symbolCol: guessColumn(headers, ["symbol", "ticker", "instrument", "isin", "security", "pavadinimas"]),
+      qtyCol: guessColumn(headers, ["quantity", "qty", "units", "kiekis", "vienetai", "shares", "no. of shares"]),
+      amountCol: guessColumn(headers, ["amount", "total", "suma", "value", "cost", "total amount", "net cash", "proceeds"], ["fee", "mokestis", "commission"]),
+      priceCol: guessColumn(headers, ["price", "kaina", "price / share", "price per share", "trade price", "fill price"]),
+      actionCol: guessColumn(headers, ["action", "type", "activity type", "buy/sell", "veiksmas"]),
+      amountMode: "total",
+    };
+    state.portfolioImportStep = "mapping";
+    render();
+  } catch (err) {
+    alert("Klaida skaitant failą: " + err.message);
+  }
+}
+function updatePortfolioMapping(field, val) {
+  const numericFields = ["symbolCol","qtyCol","amountCol","priceCol","actionCol"];
+  state.portfolioImportMapping[field] = field === "amountMode" ? val : (numericFields.includes(field) ? (val === "" ? null : Number(val)) : val);
+  render();
+}
+function proceedToPortfolioReview() {
+  try {
+    const { dataRows } = state.portfolioImportRaw;
+    const { symbolCol, qtyCol, amountCol, priceCol, amountMode, actionCol } = state.portfolioImportMapping;
+    if (symbolCol === null || qtyCol === null) { alert("Pasirink bent tikslo ir kiekio stulpelius."); return; }
+    if (amountMode === "total" && amountCol === null) { alert("Pasirink bendros sumos stulpelį, arba perjunk į „Vieneto kaina“."); return; }
+    if (amountMode === "price" && priceCol === null) { alert("Pasirink vieneto kainos stulpelį, arba perjunk į „Bendra suma“."); return; }
+    let skippedNonBuy = 0;
+    const groups = {};
+    dataRows.forEach((row) => {
+      if (actionCol !== null) {
+        const action = (row[actionCol] || "").toLowerCase();
+        const looksLikeBuy = action.includes("buy") || action.includes("pirk");
+        const looksLikeOther = action.includes("sell") || action.includes("dividend") || action.includes("deposit") || action.includes("withdraw") || action.includes("interest") || action.includes("fee") || action.includes("parduot") || action.includes("dividend");
+        if (looksLikeOther && !looksLikeBuy) { skippedNonBuy++; return; }
+      }
+      const sym = (row[symbolCol] || "").trim().toUpperCase();
+      if (!sym) return;
+      const qty = parseFlexibleAmount(row[qtyCol]);
+      if (qty === null || qty === 0) return;
+      let amt;
+      if (amountMode === "total") amt = parseFlexibleAmount(row[amountCol]);
+      else amt = qty * (parseFlexibleAmount(row[priceCol]) || 0);
+      if (!groups[sym]) groups[sym] = { units: 0, invested: 0 };
+      groups[sym].units += Math.abs(qty);
+      groups[sym].invested += Math.abs(amt || 0);
+    });
+    const drafts = Object.keys(groups).map(sym => ({ id: uid(), ticker: sym, units: groups[sym].units, invested: groups[sym].invested, include: true }));
+    if (drafts.length === 0) { alert("Nepavyko atpažinti nė vieno įrašo. Patikrink stulpelių pasirinkimą."); return; }
+    state.portfolioImportSkipped = skippedNonBuy;
+    state.portfolioImportDrafts = drafts;
+    state.portfolioImportStep = "review";
+    render();
+  } catch (err) {
+    alert("Klaida apdorojant failą: " + err.message);
+  }
+}
+function togglePortfolioDraftInclude(id) {
+  const d = state.portfolioImportDrafts.find(x => x.id === id);
+  if (d) d.include = !d.include;
+  render();
+}
+function confirmPortfolioImport() {
+  const included = state.portfolioImportDrafts.filter(d => d.include);
+  if (included.length === 0) { alert("Nepažymėtas nė vienas tikslas."); return; }
+  const mode = state.portfolioImportMode;
+  included.forEach(d => {
+    const existing = state.holdings.find(h => h.ticker === d.ticker);
+    if (existing) {
+      if (mode === "replace") { existing.units = d.units; existing.invested = d.invested; }
+      else { existing.units += d.units; existing.invested += d.invested; }
+    } else {
+      state.holdings.push({ id: uid(), ticker: d.ticker, units: d.units, invested: d.invested, lastPrice: null, lastPriceAt: null, priceError: null });
+    }
+  });
+  state.portfolioImportStep = null; state.portfolioImportRaw = null; state.portfolioImportDrafts = []; state.portfolioImportFile = null;
+  persistAll(); render();
+  showToast(`Importuota tikslų: ${included.length}`);
+}
+function cancelPortfolioImport() {
+  state.portfolioImportStep = null; state.portfolioImportRaw = null; state.portfolioImportDrafts = []; state.portfolioImportFile = null;
+  render();
+}
+
 function computeCurrentNetWorth() {
   const savings = state.savingsBalance;
   const invested = allTimeInvestedTotal();
   const savingsGoals = allTimeSavingsGoalTotal();
+  const portfolio = portfolioCurrentValue();
+  const crypto = cryptoPortfolioValue();
   const loans = allTimeLoanRemainingTotal();
-  return { savings, invested, savingsGoals, loans, netWorth: savings + invested + savingsGoals - loans };
+  return { savings, invested, savingsGoals, portfolio, crypto, loans, netWorth: savings + invested + savingsGoals + portfolio + crypto - loans };
 }
 function recordNetWorthSnapshot() {
   const monthKey = currentMonthKey();
@@ -1584,6 +2019,43 @@ function ruleInfoCard(id, title, summary, details) {
     ${expanded ? `<div style="font-size:12px;color:var(--faint);margin-top:10px;padding-top:10px;border-top:1px solid rgba(237,234,224,0.08);line-height:1.6;">${details}</div>` : ""}
   </div>`;
 }
+
+// ===== Individualios veiklos mokesčių skaičiuoklė — izoliuota logika, saugu pašalinti kartu su UI dalimi renderRules() ir jos state.taxCalc/taxCalcResult laukais =====
+function calculateIVTax(inputs) {
+  const income = parseFloat(String(inputs.income).replace(",", ".")) || 0;
+  const otherIncome = parseFloat(String(inputs.otherIncome).replace(",", ".")) || 0;
+  const actualExpenses = parseFloat(String(inputs.actualExpenses).replace(",", ".")) || 0;
+  const expenses = inputs.method === "actual" ? actualExpenses : income * 0.30;
+  const AP = Math.max(0, income - expenses);
+
+  let gpm;
+  if (AP <= 20000) {
+    gpm = AP * 0.05;
+  } else if (AP <= 42500) {
+    const pmk = AP * (0.15 - (2/300000) * (AP - 20000));
+    gpm = Math.max(0, AP * 0.15 - pmk);
+  } else {
+    const T1 = 82962, T2 = 138270;
+    const bracketTax = (v) => v <= T1 ? v*0.20 : v <= T2 ? T1*0.20 + (v-T1)*0.25 : T1*0.20 + (T2-T1)*0.25 + (v-T2)*0.32;
+    gpm = Math.max(0, bracketTax(AP + otherIncome) - bracketTax(otherIncome));
+  }
+
+  const socialBase = Math.max(AP * 0.90, 13836);
+  const vsd = inputs.firstYearRelief ? 0 : socialBase * 0.1252;
+  const psd = inputs.insuredElsewhere ? 0 : Math.max(socialBase * 0.0698, 80.48 * 12);
+
+  const total = gpm + vsd + psd;
+  return { income, expenses, AP, gpm, vsd, psd, total, net: income - total };
+}
+function runTaxCalc() {
+  state.taxCalc.income = document.getElementById("tax_income").value;
+  if (state.taxCalc.method === "actual") state.taxCalc.actualExpenses = document.getElementById("tax_expenses").value;
+  state.taxCalc.otherIncome = document.getElementById("tax_other").value;
+  if (!parseFloat(String(state.taxCalc.income).replace(",","."))) { alert("Įvesk pajamų sumą."); return; }
+  state.taxCalcResult = calculateIVTax(state.taxCalc);
+  render();
+}
+// ===== Individualios veiklos mokesčių skaičiuoklės logikos pabaiga =====
 
 function renderRules() {
   const income = state.baseIncome;
@@ -1663,6 +2135,59 @@ function renderRules() {
         <button type="button" class="submit-btn" style="margin-top:8px;padding:9px 0;font-size:13px;" onclick="createLoanFromCalculator()">Sukurti kaip paskolos kategoriją</button>
       </div>
     ` : ""}
+
+    <div class="section-label" style="margin-top:22px;">Investicijų mokesčiai (informacija)</div>
+    ${ruleInfoCard("stocktax", "📈 Akcijų/investicijų pardavimo mokesčiai",
+      "15% GPM nuo pelno · 500 €/metus neapmokestinama riba · išlaikius 5+ metus, visada 15% nepriklausomai nuo sumos.",
+      "<b>Bazinis principas:</b> mokestis atsiranda tik pardavus su pelnu (nerealizuotas vertės augimas neapmokestinamas).<br><br>" +
+      "<b>500 € riba:</b> jei visų per metus parduotų vertybinių popierių bendras pelnas (atėmus nuostolius iš kitų sandorių) neviršija 500 €, mokesčio mokėti nereikia. Riba taikoma bendram metų rezultatui, ne kiekvienam sandoriui atskirai.<br><br>" +
+      "<b>Išlaikymo terminas svarbus:</b> jei akcijos (ne per investicinę sąskaitą) išlaikytos <b>5 metus ar ilgiau</b> — pelnas visada apmokestinamas 15%, nepriklausomai nuo sumos.<br>" +
+      "Jei išlaikytos <b>trumpiau nei 5 metus</b> — 15% taikomas tik kol tokių pajamų (kartu su kitomis ne-darbo pajamomis) suma per metus neviršija 12 VDU (2026 m. ≈ 27 746 €). Virš šios ribos taikomi didesni, progresiniai 20/25/32% tarifai.<br><br>" +
+      "<b>Investicinė sąskaita:</b> jei prekiauji per tam tikslui deklaruotą sąskaitą, mokestis skaičiuojamas kitaip — tik kai iš sąskaitos išsiimi daugiau, nei į ją įnešei (ne nuo kiekvieno pelningo sandorio).<br><br>" +
+      "<b>Dividendai:</b> visada 15%, 500 € riba dividendams NETAIKOMA.<br><br>" +
+      "<b>Kripto valiutos:</b> paprastai apmokestinamos panašiu principu kaip kitas finansinis turtas, bet taisyklės keičiasi — būtinai patikrink naujausią VMI poziciją prieš deklaruodamas.<br><br>" +
+      "<b>Deklaravimas:</b> per metinę GPM311 deklaraciją iki gegužės 1 d. sekančiais metais.<br><br>" +
+      "<span style='color:var(--gold);'>Tai bendra informacija, ne asmeninis patarimas — tikslią situaciją (ypač ties ribomis) patikrink su VMI ar buhalteriu.</span>"
+    )}
+
+    <!-- ===== INDIVIDUALIOS VEIKLOS MOKESČIŲ SKAIČIUOKLĖ — izoliuota sekcija, saugu pašalinti nepaliečiant kito kodo ===== -->
+    <div class="section-label" style="margin-top:22px;">Individualios veiklos mokesčių įvertinimas</div>
+    <div class="tip-card" style="border-left-color:var(--rust);">
+      <div style="color:var(--rust);font-weight:600;margin-bottom:4px;">⚠️ Tai įvertinimas planavimui, ne oficialus skaičiavimas</div>
+      <div style="font-size:12px;color:var(--faint);">Pagrįsta 2026 m. viešai skelbiamomis formulėmis dažniausiam atvejui (individuali veikla pagal pažymą, pinigų apskaita). Neapima PVM, ūkininkų, verslo liudijimo ar kitų specialių atvejų. Prieš mokant ar deklaruojant — <b>būtinai</b> patikrink su VMI arba buhalteriu, ypač jei pajamos artimos riboms.</div>
+    </div>
+    <form class="stack" onsubmit="event.preventDefault(); runTaxCalc();">
+      <label class="field">Individualios veiklos pajamos per metus (€)<input id="tax_income" type="text" inputmode="decimal" placeholder="pvz. 25000" value="${escapeHtml(String(state.taxCalc.income))}" /></label>
+      <label class="field">Sąnaudų metodas
+        <div class="toggle-row">
+          <button type="button" class="toggle-btn ${state.taxCalc.method!=='actual'?'active blue':''}" onclick="state.taxCalc.method='30pct';render();">30% norma</button>
+          <button type="button" class="toggle-btn ${state.taxCalc.method==='actual'?'active blue':''}" onclick="state.taxCalc.method='actual';render();">Faktinės išlaidos</button>
+        </div>
+      </label>
+      ${state.taxCalc.method === "actual" ? `<label class="field">Faktinės metinės sąnaudos (€)<input id="tax_expenses" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.actualExpenses))}" /></label>` : ""}
+      <label class="field">Kitos metinės pajamos (alga ir kt., nebūtina — reikia tikslesniam skaičiavimui virš 42 500 €)<input id="tax_other" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.otherIncome))}" /></label>
+      <label class="checkbox-field"><input type="checkbox" id="tax_insured" ${state.taxCalc.insuredElsewhere?'checked':''} onchange="state.taxCalc.insuredElsewhere=this.checked;" /> Jau apdraustas kitur (pvz. darbo santykiais) — PSD nuo veiklos nereikės</label>
+      <label class="checkbox-field"><input type="checkbox" id="tax_firstyear" ${state.taxCalc.firstYearRelief?'checked':''} onchange="state.taxCalc.firstYearRelief=this.checked;" /> Taikoma pirmų metų VSD lengvata</label>
+      <button type="submit" class="submit-btn" style="background:var(--rust);">Apskaičiuoti</button>
+    </form>
+    ${state.taxCalcResult ? (() => {
+      const t = state.taxCalcResult;
+      return `<div class="tip-card" style="border-left-color:var(--rust);margin-top:14px;">
+        <div style="font-weight:700;margin-bottom:8px;">Įvertinimas</div>
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:13px;">
+          <div style="display:flex;justify-content:space-between;"><span>Pajamos</span><span class="tape">€${fmt(t.income)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Atskaitomos sąnaudos</span><span class="tape">€${fmt(t.expenses)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>Apmokestinamosios pajamos (AP)</span><span class="tape">€${fmt(t.AP)}</span></div>
+          <div style="display:flex;justify-content:space-between;border-top:1px solid rgba(237,234,224,0.1);padding-top:4px;margin-top:2px;"><span>GPM</span><span class="tape" style="color:var(--rust)">€${fmt(t.gpm)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>VSD</span><span class="tape" style="color:var(--rust)">€${fmt(t.vsd)}</span></div>
+          <div style="display:flex;justify-content:space-between;"><span>PSD</span><span class="tape" style="color:var(--rust)">€${fmt(t.psd)}</span></div>
+          <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid rgba(237,234,224,0.1);padding-top:4px;margin-top:2px;"><span>Iš viso mokesčių</span><span class="tape" style="color:var(--rust)">€${fmt(t.total)}</span></div>
+          <div style="display:flex;justify-content:space-between;font-weight:700;"><span>Lieka į rankas</span><span class="tape" style="color:var(--green)">€${fmt(t.net)}</span></div>
+        </div>
+      </div>`;
+    })() : ""}
+    <!-- ===== INDIVIDUALIOS VEIKLOS MOKESČIŲ SKAIČIUOKLĖ PABAIGA ===== -->
+
   </div>`;
 }
 
@@ -1729,6 +2254,8 @@ function renderYearlyReport() {
       <div class="stat-card"><div class="stat-label">Santaupos</div><div class="tape stat-value" style="color:var(--gold)">€${fmt(nw.savings)}</div></div>
       <div class="stat-card"><div class="stat-label">Investuota (visą laiką)</div><div class="tape stat-value" style="color:var(--blue)">€${fmt(nw.invested)}</div></div>
       <div class="stat-card"><div class="stat-label">Taupymo tikslai (visą laiką)</div><div class="tape stat-value" style="color:var(--gold)">€${fmt(nw.savingsGoals)}</div></div>
+      <div class="stat-card"><div class="stat-label">Akcijų portfelis</div><div class="tape stat-value" style="color:var(--blue)">€${fmt(nw.portfolio)}</div></div>
+      <div class="stat-card"><div class="stat-label">Kripto portfelis</div><div class="tape stat-value" style="color:var(--blue)">€${fmt(nw.crypto)}</div></div>
       <div class="stat-card"><div class="stat-label">Skolos (liko)</div><div class="tape stat-value" style="color:var(--rust)">€${fmt(nw.loans)}</div></div>
       <div class="stat-card"><div class="stat-label">Grynasis turtas</div><div class="tape stat-value" style="color:${nw.netWorth>=0?'var(--green)':'var(--rust)'}">€${fmt(nw.netWorth)}</div></div>
     </div>
@@ -1846,6 +2373,20 @@ function renderSettings() {
             `<div style="display:flex;align-items:center;gap:4px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.budgets[c] ?? ''}" style="max-width:100px;" onchange="updateBudget('${c}', this.value)" /><span style="font-size:11px;color:var(--faint);">tikslas / mėn.</span></div>`
           }
           <div style="font-size:11px;color:var(--faint);margin-top:6px;">${isSavingsGoal ? 'Taupymo tikslas — pinigai kaupiasi konkrečiam dalykui, neskaičiuojama kaip investicinis augimas.' : 'Investicija — skaičiuojama į Grynąjį turtą kaip augantis turtas.'}</div>
+          ${isSavingsGoal ? `
+            <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(237,234,224,0.08);">
+              <div style="font-size:11px;color:var(--faint);margin-bottom:6px;">Nebūtina: jei žinai konkrečią sumą ir datą, paskaičiuosime, kiek reikia atidėti per mėnesį.</div>
+              <div style="display:flex;gap:8px;margin-bottom:6px;">
+                <div style="display:flex;align-items:center;gap:4px;flex:1;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.targetAmount ?? ''}" placeholder="Tikslo suma" onchange="updateCategoryTargetAmount('${c}', this.value)" /></div>
+                <input type="date" value="${cfg.targetDate ?? ''}" onchange="updateCategoryTargetDate('${c}', this.value)" style="flex:1;" />
+              </div>
+              ${(() => {
+                const proj = requiredMonthlyForGoal(c);
+                if (!proj) return "";
+                return `<div style="font-size:12px;">Reikia atidėti: <span class="tape" style="color:var(--gold);">€${fmt(proj.monthly)}/mėn.</span> (${proj.months} mėn. liko, trūksta €${fmt(proj.remaining)})</div>`;
+              })()}
+            </div>
+          ` : ""}
         ` : isLoan ? `
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.loanTotal ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','loanTotal', this.value)" /><span style="font-size:11px;color:var(--faint);">bendra paskolos suma</span></div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:8px;"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${cfg.minPayment ?? ''}" style="max-width:120px;" onchange="updateCategoryGoal('${c}','minPayment', this.value)" /><span style="font-size:11px;color:var(--faint);">minimali mėn. įmoka</span></div>
@@ -1902,6 +2443,94 @@ function renderSettings() {
         <button class="icon-btn" onclick="state.editingRecurringId='${t.id}';render();" aria-label="Redaguoti">${ICONS.pencil}</button>
         <button class="icon-btn" style="color:var(--rust);" onclick="deleteRecurringTemplate('${t.id}')" aria-label="Ištrinti pasikartojančią išlaidą">${ICONS.trash}</button>
       </span>
+    </div>`;
+  }).join("");
+
+  const recurringIncomeRows = state.recurringIncomes.map(t => {
+    if (state.editingRecurringIncomeId === t.id) {
+      return `<div class="ledger-row" style="padding:10px 0;">
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input id="recinc_edit_amount" type="text" inputmode="decimal" value="${t.amount}" style="flex:1;" />
+          <input id="recinc_edit_label" type="text" value="${escapeHtml(t.label||'')}" placeholder="Pavadinimas" style="flex:1;" />
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="icon-btn" style="color:var(--gold)" onclick="confirmEditRecurringIncome('${t.id}')">${ICONS.check}</button>
+          <button class="icon-btn" onclick="state.editingRecurringIncomeId=null;render();">${ICONS.x}</button>
+        </div>
+      </div>`;
+    }
+    return `
+    <div class="ledger-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:13px;">
+      <span style="color:var(--green);">↑ ${escapeHtml(t.label)}</span>
+      <span style="display:flex;align-items:center;gap:8px;">
+        <span class="tape">€${fmt(t.amount)}/mėn.</span>
+        <button class="icon-btn" onclick="state.editingRecurringIncomeId='${t.id}';render();" aria-label="Redaguoti">${ICONS.pencil}</button>
+        <button class="icon-btn" style="color:var(--rust);" onclick="deleteRecurringIncome('${t.id}')" aria-label="Ištrinti pasikartojančią pajamą">${ICONS.trash}</button>
+      </span>
+    </div>`;
+  }).join("");
+
+  const holdingRows = state.holdings.map(h => {
+    if (state.editingHoldingId === h.id) {
+      return `<div class="ledger-row" style="padding:10px 0;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;">${escapeHtml(h.ticker)}</div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input id="hold_edit_units" type="text" inputmode="decimal" value="${h.units}" placeholder="Vienetai" style="flex:1;" />
+          <input id="hold_edit_invested" type="text" inputmode="decimal" value="${h.invested}" placeholder="Investuota €" style="flex:1;" />
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="icon-btn" style="color:var(--gold)" onclick="confirmEditHolding('${h.id}')">${ICONS.check}</button>
+          <button class="icon-btn" onclick="state.editingHoldingId=null;render();">${ICONS.x}</button>
+        </div>
+      </div>`;
+    }
+    const value = h.lastPrice ? h.units * h.lastPrice : null;
+    const gain = value !== null ? value - h.invested : null;
+    const gainPct = (gain !== null && h.invested > 0) ? (gain / h.invested) * 100 : null;
+    return `<div class="ledger-row" style="padding:8px 0;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:13px;font-weight:600;">${escapeHtml(h.ticker)}</span>
+        <span style="display:flex;align-items:center;gap:6px;">
+          <button class="icon-btn" onclick="state.editingHoldingId='${h.id}';render();" aria-label="Redaguoti">${ICONS.pencil}</button>
+          <button class="icon-btn" style="color:var(--rust);" onclick="deleteHolding('${h.id}')" aria-label="Ištrinti">${ICONS.trash}</button>
+        </span>
+      </div>
+      <div style="font-size:11px;color:var(--faint);margin-top:2px;">${fmt(h.units)} vnt. · investuota €${fmt(h.invested)}</div>
+      ${value !== null ? `<div style="font-size:12px;margin-top:3px;">Vertė: <span class="tape">€${fmt(value)}</span> · <span class="tape" style="color:${gain>=0?'var(--green)':'var(--rust)'}">${gain>=0?'+':''}€${fmt(gain)} (${gain>=0?'+':''}${fmt(gainPct)}%)</span></div>` : `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Kaina dar neatnaujinta</div>`}
+      ${h.priceError ? `<div style="font-size:11px;color:var(--rust);margin-top:3px;">${escapeHtml(h.priceError)}</div>` : ""}
+      ${h.lastPriceAt ? `<div style="font-size:10px;color:var(--faint);margin-top:2px;">Kaina atnaujinta: ${new Date(h.lastPriceAt).toLocaleString('lt-LT')}</div>` : ""}
+    </div>`;
+  }).join("");
+
+  const cryptoRows = state.cryptoHoldings.map(h => {
+    if (state.editingCryptoId === h.id) {
+      return `<div class="ledger-row" style="padding:10px 0;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;">${escapeHtml(h.coinId)}</div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input id="crypto_edit_units" type="text" inputmode="decimal" value="${h.units}" placeholder="Vienetai" style="flex:1;" />
+          <input id="crypto_edit_invested" type="text" inputmode="decimal" value="${h.invested}" placeholder="Investuota €" style="flex:1;" />
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="icon-btn" style="color:var(--gold)" onclick="confirmEditCryptoHolding('${h.id}')">${ICONS.check}</button>
+          <button class="icon-btn" onclick="state.editingCryptoId=null;render();">${ICONS.x}</button>
+        </div>
+      </div>`;
+    }
+    const value = h.lastPrice ? h.units * h.lastPrice : null;
+    const gain = value !== null ? value - h.invested : null;
+    const gainPct = (gain !== null && h.invested > 0) ? (gain / h.invested) * 100 : null;
+    return `<div class="ledger-row" style="padding:8px 0;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:13px;font-weight:600;">${escapeHtml(h.coinId)}</span>
+        <span style="display:flex;align-items:center;gap:6px;">
+          <button class="icon-btn" onclick="state.editingCryptoId='${h.id}';render();" aria-label="Redaguoti">${ICONS.pencil}</button>
+          <button class="icon-btn" style="color:var(--rust);" onclick="deleteCryptoHolding('${h.id}')" aria-label="Ištrinti">${ICONS.trash}</button>
+        </span>
+      </div>
+      <div style="font-size:11px;color:var(--faint);margin-top:2px;">${fmt(h.units)} vnt. · investuota €${fmt(h.invested)}</div>
+      ${value !== null ? `<div style="font-size:12px;margin-top:3px;">Vertė: <span class="tape">€${fmt(value)}</span> · <span class="tape" style="color:${gain>=0?'var(--green)':'var(--rust)'}">${gain>=0?'+':''}€${fmt(gain)} (${gain>=0?'+':''}${fmt(gainPct)}%)</span></div>` : `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Kaina dar neatnaujinta</div>`}
+      ${h.priceError ? `<div style="font-size:11px;color:var(--rust);margin-top:3px;">${escapeHtml(h.priceError)}</div>` : ""}
+      ${h.lastPriceAt ? `<div style="font-size:10px;color:var(--faint);margin-top:2px;">Kaina atnaujinta: ${new Date(h.lastPriceAt).toLocaleString('lt-LT')}</div>` : ""}
     </div>`;
   }).join("");
 
@@ -1965,12 +2594,79 @@ function renderSettings() {
       <button type="submit" class="submit-btn">${ICONS.plus} Pridėti pasikartojančias išlaidas</button>
     </form>
     <div style="font-size:12px;color:var(--faint);margin-top:8px;">Kiekvieno mėnesio 1 dieną automatiškai pridedama kaip išlaida.</div>
+    ${state.recurringTemplates.length > 0 ? `<div style="font-size:12px;color:var(--faint);margin-top:6px;">Iš viso pasikartojančių išlaidų: <span class="tape" style="color:var(--paper);">€${fmt(state.recurringTemplates.reduce((s,t)=>s+Number(t.amount),0))}/mėn.</span></div>` : ""}
+
+    <div class="section-label" style="margin-top:18px;">Galimos prenumeratos / pasikartojančios išlaidos</div>
+    <div style="font-size:11px;color:var(--faint);margin-bottom:10px;">Peržiūri tavo išlaidų istoriją ir suranda mokėjimus, kurie kartojasi tą pačią sumą bent 3 skirtingus mėnesius, bet dar nepaversti į pasikartojančias.</div>
+    <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);margin-bottom:10px;" onclick="runSubscriptionScan()">Ieškoti pasikartojančių mokėjimų</button>
+    ${state.detectedSubscriptions.map((c,idx) => `
+      <div class="ledger-row" style="padding:8px 0;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:13px;">${catEmoji(c.category)}${escapeHtml(c.category)}${c.note?` · ${escapeHtml(c.note)}`:""}</span>
+          <span class="tape" style="font-size:13px;">€${fmt(c.amount)}/mėn.</span>
+        </div>
+        <div style="font-size:11px;color:var(--faint);margin-top:2px;margin-bottom:6px;">Aptikta ${c.months} mėn.</div>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="submit-btn" style="padding:6px 0;font-size:12px;" onclick="convertDetectedToRecurring(${idx})">Paversti į pasikartojančią</button>
+          <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:6px 14px;font-size:12px;" onclick="dismissDetectedSubscription(${idx})">Ne, ačiū</button>
+        </div>
+      </div>`).join("")}
+
+    <div class="section-label" style="margin-top:24px;">Pasikartojančios pajamos</div>
+    ${recurringIncomeRows || `<div class="empty">Nėra pasikartojančių pajamų.</div>`}
+    <form class="stack" style="margin-top:12px;" onsubmit="return submitAddRecurringIncome(event)">
+      <div style="display:flex;gap:8px;">
+        <input id="recinc_amount" type="text" inputmode="decimal" placeholder="Suma €" style="flex:1;" />
+        <input id="recinc_label" type="text" placeholder="Pavadinimas (pvz. Alga)" style="flex:1;" />
+      </div>
+      <button type="submit" class="submit-btn" style="background:var(--green);">${ICONS.plus} Pridėti pasikartojančias pajamas</button>
+    </form>
+    <div style="font-size:12px;color:var(--faint);margin-top:8px;">Kiekvieno mėnesio 1 dieną automatiškai pridedama kaip pajama (pvz. pastovi alga).</div>
 
     <div class="section-label" style="margin-top:24px;">Banko išrašo importas</div>
     <label class="submit-btn" style="background:var(--blue);color:var(--ink);text-align:center;">
       ${ICONS.plus} Importuoti CSV failą<input type="file" accept=".csv,.txt,text/csv,text/plain,*/*" style="display:none;" onchange="handleCsvFile(this)" />
     </label>
     <div style="font-size:12px;color:var(--faint);margin-top:8px;">Įkelk iš banko atsisiųstą CSV išrašą — programėlė pasiūlys stulpelių atitikmenis ir kategorijas, tu peržiūri prieš patvirtindamas.</div>
+
+    <div class="section-label" style="margin-top:24px;">Investicijų portfelis</div>
+    <div class="field-row">
+      <span class="field-row-label">Finnhub API raktas</span>
+    </div>
+    <input type="text" value="${escapeHtml(state.finnhubApiKey)}" placeholder="Įklijuok nemokamą raktą iš finnhub.io" onchange="updateFinnhubKey(this.value)" style="margin-bottom:6px;" />
+    <div style="font-size:11px;color:var(--faint);margin-bottom:14px;">Nemokamai gaunamas per finnhub.io (registracija el. paštu, be mokėjimo kortelės). Naudojamas tik kainoms gauti tiesiai iš tavo naršyklės.</div>
+
+    ${holdingRows || `<div class="empty">Nėra pridėtų laikymų.</div>`}
+    <form class="stack" style="margin-top:12px;" onsubmit="return submitAddHolding(event)">
+      <div style="display:flex;gap:8px;">
+        <input id="hold_ticker" type="text" placeholder="Tikslas (pvz. AAPL)" style="flex:1;" />
+        <input id="hold_units" type="text" inputmode="decimal" placeholder="Vienetai" style="flex:1;" />
+      </div>
+      <input id="hold_invested" type="text" inputmode="decimal" placeholder="Investuota iš viso (€)" />
+      <button type="submit" class="submit-btn" style="background:var(--blue);">${ICONS.plus} Pridėti / atnaujinti laikymą</button>
+    </form>
+    <div style="font-size:11px;color:var(--faint);margin-top:8px;margin-bottom:14px;">Jei tikslas jau yra, nauji vienetai/suma pridedami prie esamų.</div>
+
+    <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);" ${state.priceRefreshing?'disabled':''} onclick="refreshHoldingPrices()">${state.priceRefreshing ? "Atnaujinama…" : "Atnaujinti kainas"}</button>
+
+    <label class="submit-btn" style="background:var(--blue);color:var(--ink);text-align:center;margin-top:8px;">
+      ${ICONS.plus} Importuoti iš brokerio CSV<input type="file" accept=".csv,.txt,text/csv,text/plain,*/*" style="display:none;" onchange="handlePortfolioCsvFile(this)" />
+    </label>
+    <div style="font-size:11px;color:var(--faint);margin-top:8px;">Įkelk brokerio (pvz. Revolut Trading, IBKR) operacijų istorijos CSV — programėlė susumuos pirkimus pagal tikslą.</div>
+
+    <div class="section-label" style="margin-top:24px;">Kriptovaliutų portfelis</div>
+    <div style="font-size:11px;color:var(--faint);margin-bottom:12px;">Kainos gaunamos iš CoinGecko — nemokamai, be jokio rakto. Įvesk CoinGecko ID, ne trumpinį (pvz. „bitcoin", ne „BTC"; „ethereum", ne „ETH").</div>
+    ${cryptoRows || `<div class="empty">Nėra pridėtų kripto laikymų.</div>`}
+    <form class="stack" style="margin-top:12px;" onsubmit="return submitAddCrypto(event)">
+      <div style="display:flex;gap:8px;">
+        <input id="crypto_id" type="text" placeholder="CoinGecko ID (pvz. bitcoin)" style="flex:1;" />
+        <input id="crypto_units" type="text" inputmode="decimal" placeholder="Vienetai" style="flex:1;" />
+      </div>
+      <input id="crypto_invested" type="text" inputmode="decimal" placeholder="Investuota iš viso (€)" />
+      <button type="submit" class="submit-btn" style="background:var(--blue);">${ICONS.plus} Pridėti / atnaujinti laikymą</button>
+    </form>
+    <div style="font-size:11px;color:var(--faint);margin-top:8px;margin-bottom:14px;">Jei tikslas jau yra, nauji vienetai/suma pridedami prie esamų.</div>
+    <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);" ${state.cryptoPriceRefreshing?'disabled':''} onclick="refreshCryptoPrices()">${state.cryptoPriceRefreshing ? "Atnaujinama…" : "Atnaujinti kripto kainas"}</button>
 
     <div class="section-label" style="margin-top:24px;">Atsarginė kopija</div>
     <div style="display:flex;gap:8px;">
@@ -1980,6 +2676,7 @@ function renderSettings() {
       </label>
     </div>
     ${exportReminder}
+    <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);margin-top:8px;" onclick="exportCSV()">Eksportuoti CSV (Excel/Sheets)</button>
 
     <div class="section-label" style="margin-top:24px;">Mano biudžeto mėnuo</div>
     <div class="field-row">
@@ -2068,6 +2765,32 @@ function submitAddRecurring(ev) {
   addRecurringTemplate(amount, category, note, "reikalinga");
   return false;
 }
+function submitAddRecurringIncome(ev) {
+  ev.preventDefault();
+  const amount = document.getElementById("recinc_amount").value;
+  const label = document.getElementById("recinc_label").value;
+  addRecurringIncome(amount, label);
+  return false;
+}
+function submitAddHolding(ev) {
+  ev.preventDefault();
+  const ticker = document.getElementById("hold_ticker").value;
+  const units = document.getElementById("hold_units").value;
+  const invested = document.getElementById("hold_invested").value;
+  addHolding(ticker, units, invested);
+  document.getElementById("hold_ticker").value = "";
+  document.getElementById("hold_units").value = "";
+  document.getElementById("hold_invested").value = "";
+  return false;
+}
+function submitAddCrypto(ev) {
+  ev.preventDefault();
+  const coinId = document.getElementById("crypto_id").value;
+  const units = document.getElementById("crypto_units").value;
+  const invested = document.getElementById("crypto_invested").value;
+  addCryptoHolding(coinId, units, invested);
+  return false;
+}
 function updateBudgetStartDay(val) {
   const n = Math.min(28, Math.max(1, parseInt(val, 10) || 1));
   state.budgetStartDay = n;
@@ -2085,7 +2808,7 @@ function exportData() {
     categories: state.categories, categoryConfig: state.categoryConfig,
     baseIncome: state.baseIncome, gaugeStyle: state.gaugeStyle, theme: state.theme,
     recurringTemplates: state.recurringTemplates, budgetStartDay: state.budgetStartDay,
-    merchantMap: state.merchantMap, importedHashes: state.importedHashes, savingsBalance: state.savingsBalance, netWorthHistory: state.netWorthHistory, exportedAt: new Date().toISOString(),
+    merchantMap: state.merchantMap, importedHashes: state.importedHashes, savingsBalance: state.savingsBalance, netWorthHistory: state.netWorthHistory, recurringIncomes: state.recurringIncomes, holdings: state.holdings, finnhubApiKey: state.finnhubApiKey, cryptoHoldings: state.cryptoHoldings, exportedAt: new Date().toISOString(),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -2095,6 +2818,23 @@ function exportData() {
   URL.revokeObjectURL(url);
   state.lastExportAt = new Date().toISOString();
   persistAll(); render();
+}
+function csvCell(v) { return `"${String(v ?? "").replace(/"/g, '""')}"`; }
+function exportCSV() {
+  const rows = [["Data","Tipas","Kategorija / pavadinimas","Suma (€)","Pastaba","Būtina","Iš santaupų"]];
+  const all = [
+    ...state.expenses.map(e => ({date:e.date, type:"Išlaida", cat:e.category, amount:e.amount, note:e.note||"", necessity:e.necessity==="nereikalinga"?"Ne":"Taip", fromSavings:e.fromSavings?"Taip":""})),
+    ...state.incomes.map(i => ({date:i.date, type:"Pajama", cat:i.label, amount:i.amount, note:"", necessity:"", fromSavings:""})),
+  ].sort((a,b) => a.date.localeCompare(b.date));
+  all.forEach(r => rows.push([r.date, r.type, r.cat, String(r.amount).replace(".",","), r.note, r.necessity, r.fromSavings]));
+  const csvText = rows.map(r => r.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob(["\uFEFF" + csvText], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `biudzetas-israsai-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast("CSV failas atsiųstas");
 }
 function importDataFile(input) {
   const file = input.files && input.files[0];
@@ -2117,6 +2857,10 @@ function importDataFile(input) {
       if (data.importedHashes) state.importedHashes = data.importedHashes;
       if (typeof data.savingsBalance === "number") state.savingsBalance = data.savingsBalance;
       if (data.netWorthHistory) state.netWorthHistory = data.netWorthHistory;
+      if (data.recurringIncomes) state.recurringIncomes = data.recurringIncomes;
+      if (data.holdings) state.holdings = data.holdings;
+      if (typeof data.finnhubApiKey === "string") state.finnhubApiKey = data.finnhubApiKey;
+      if (data.cryptoHoldings) state.cryptoHoldings = data.cryptoHoldings;
       persistAll();
       applyTheme();
       render();
@@ -2164,6 +2908,7 @@ function renderImportMapping() {
   const mojibake = looksMojibake(previewText);
   return `<div class="topbar"><div class="eyebrow">Banko išrašo importas</div></div>
   <div class="tabpanel fade-in">
+    ${state.csvMappingMemory[state.importHeaderSig] ? `<div style="font-size:12px;color:var(--green);margin-bottom:12px;">✓ Stulpeliai atpažinti iš ankstesnio šio banko importo.</div>` : ""}
     ${skippedRows > 0 ? `<div style="font-size:12px;color:var(--faint);margin-bottom:12px;">Praleista ${skippedRows} eilutė(-ių) prieš antraštę (aptikta automatiškai).</div>` : ""}
     ${mojibake ? `<div style="background:rgba(217,119,66,0.15);border:1px solid var(--rust);color:var(--rust);border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:14px;">
       Tekste matosi keisti simboliai — failas galimai ne UTF-8 koduotėje.
@@ -2224,6 +2969,74 @@ function renderImportReview() {
     <div style="display:flex;gap:8px;margin-top:16px;">
       <button type="button" class="submit-btn" style="flex:1;width:auto;" onclick="confirmImport()">Importuoti pažymėtus (${includedCount})</button>
       <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelImport()">Atšaukti</button>
+    </div>
+  </div>`;
+}
+function renderPortfolioImportMapping() {
+  const { headers, dataRows } = state.portfolioImportRaw;
+  const m = state.portfolioImportMapping;
+  const colOptions = (selected) => `<option value="">–</option>` + headers.map((h,i) => `<option value="${i}" ${selected===i?'selected':''}>${h}</option>`).join("");
+  const previewRows = dataRows.slice(0,3);
+  return `<div class="topbar"><div class="eyebrow">Brokerio išrašo importas</div></div>
+  <div class="tabpanel fade-in">
+    <div class="section-label">1. Nurodyk, kur kas yra</div>
+    <label class="field">Tikslo (simbolio) stulpelis<select onchange="updatePortfolioMapping('symbolCol', this.value)">${colOptions(m.symbolCol)}</select></label>
+    <div style="height:10px;"></div>
+    <label class="field">Kiekio (vienetų) stulpelis<select onchange="updatePortfolioMapping('qtyCol', this.value)">${colOptions(m.qtyCol)}</select></label>
+    <div style="height:10px;"></div>
+    <label class="field">Sumos tipas
+      <div class="toggle-row">
+        <button type="button" class="toggle-btn ${m.amountMode!=='price'?'active blue':''}" onclick="updatePortfolioMapping('amountMode','total')">Bendra suma</button>
+        <button type="button" class="toggle-btn ${m.amountMode==='price'?'active blue':''}" onclick="updatePortfolioMapping('amountMode','price')">Vieneto kaina</button>
+      </div>
+    </label>
+    <div style="height:10px;"></div>
+    ${m.amountMode !== "price"
+      ? `<label class="field">Bendros sumos stulpelis<select onchange="updatePortfolioMapping('amountCol', this.value)">${colOptions(m.amountCol)}</select></label>`
+      : `<label class="field">Vieneto kainos stulpelis<select onchange="updatePortfolioMapping('priceCol', this.value)">${colOptions(m.priceCol)}</select></label>`
+    }
+    <div style="height:10px;"></div>
+    <label class="field">Veiksmo/tipo stulpelis (nebūtina — atskirs pirkimus nuo dividendų/įnašų)<select onchange="updatePortfolioMapping('actionCol', this.value)">${colOptions(m.actionCol)}</select></label>
+    <div class="section-label" style="margin-top:20px;">Peržiūra (antraštė + pirmos 3 eilutės)</div>
+    <div style="overflow-x:auto;font-size:11px;color:var(--faint);border:1px solid rgba(237,234,224,0.1);border-radius:8px;padding:8px;">
+      <div style="white-space:nowrap;padding:3px 0;color:var(--gold);font-weight:600;">${escapeHtml(headers.join(" | "))}</div>
+      ${previewRows.map(r => `<div style="white-space:nowrap;padding:3px 0;border-bottom:1px solid rgba(237,234,224,0.06);">${escapeHtml(r.join(" | "))}</div>`).join("")}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:20px;">
+      <button type="button" class="submit-btn" style="flex:1;width:auto;" onclick="proceedToPortfolioReview()">Toliau</button>
+      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelPortfolioImport()">Atšaukti</button>
+    </div>
+  </div>`;
+}
+function renderPortfolioImportReview() {
+  const drafts = state.portfolioImportDrafts;
+  const includedCount = drafts.filter(d => d.include).length;
+  const mode = state.portfolioImportMode;
+  const rows = drafts.map(d => {
+    const existing = state.holdings.find(h => h.ticker === d.ticker);
+    return `<div class="ledger-row" style="opacity:${d.include?1:0.4};">
+      <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;">
+        <input type="checkbox" ${d.include?'checked':''} onchange="togglePortfolioDraftInclude('${d.id}')" style="margin-top:4px;" />
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:14px;font-weight:600;">${escapeHtml(d.ticker)}${existing ? `<span class="cat-tag" style="margin-left:6px;">jau yra</span>` : ""}</div>
+          <div style="font-size:12px;color:var(--faint);">${fmt(d.units)} vnt. · €${fmt(d.invested)} investuota</div>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="topbar"><div class="eyebrow">Peržiūrėk prieš importuojant</div></div>
+  <div class="tabpanel fade-in">
+    <div style="font-size:12px;color:var(--faint);margin-bottom:12px;">Rasta ${drafts.length} tikslų.${state.portfolioImportSkipped ? ` Praleista ${state.portfolioImportSkipped} eilučių (dividendai/įnašai/pardavimai).` : ""}</div>
+    <label class="field" style="margin-bottom:14px;">Jei tikslas jau yra portfelyje
+      <div class="toggle-row">
+        <button type="button" class="toggle-btn ${mode!=='add'?'active blue':''}" onclick="state.portfolioImportMode='replace';render();">Pakeisti (visa istorija faile)</button>
+        <button type="button" class="toggle-btn ${mode==='add'?'active blue':''}" onclick="state.portfolioImportMode='add';render();">Pridėti (tik naujos operacijos)</button>
+      </div>
+    </label>
+    ${rows}
+    <div style="display:flex;gap:8px;margin-top:16px;">
+      <button type="button" class="submit-btn" style="flex:1;width:auto;" onclick="confirmPortfolioImport()">Importuoti pažymėtus (${includedCount})</button>
+      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelPortfolioImport()">Atšaukti</button>
     </div>
   </div>`;
 }
@@ -2317,6 +3130,8 @@ function render() {
   if (state.showHelp) { app.innerHTML = renderHelp(); return; }
   if (state.importStep === "mapping") { app.innerHTML = renderImportMapping(); return; }
   if (state.importStep === "review") { app.innerHTML = renderImportReview(); return; }
+  if (state.portfolioImportStep === "mapping") { app.innerHTML = renderPortfolioImportMapping(); return; }
+  if (state.portfolioImportStep === "review") { app.innerHTML = renderPortfolioImportReview(); return; }
   let body = "";
   if (state.tab === "overview") body = renderOverview();
   else if (state.tab === "add") body = renderAdd();
@@ -2348,12 +3163,37 @@ function setTab(t) {
   render();
 }
 
-applyTheme();
-applyRecurringTemplates();
-recordNetWorthSnapshot();
-if (state.appPin) state.appLocked = true;
-render();
-window.scrollTo(0, 0);
+const PERSISTED_KEYS = ["expenses","incomes","budgets","categories","categoryConfig","baseIncome","gaugeStyle","theme","lastExportAt","recurringTemplates","budgetStartDay","savingsBalance","savingsGoalMin","savingsLog","merchantMap","importedHashes","appPin","debtStrategy","appliedRules","ruleSnapshots","netWorthHistory","recurringIncomes","csvMappingMemory","holdings","finnhubApiKey","cryptoHoldings"];
+
+async function boot() {
+  let loaded = {};
+  try {
+    if (idbAvailable) {
+      await migrateLocalStorageToIDB();
+      loaded = await idbGetAll();
+    } else {
+      throw new Error("no-idb");
+    }
+  } catch (_) {
+    idbAvailable = false;
+    PERSISTED_KEYS.forEach(k => {
+      try { const v = localStorage.getItem(k); if (v) loaded[k] = JSON.parse(v); } catch (_) {}
+    });
+  }
+  PERSISTED_KEYS.forEach(k => { if (loaded[k] !== undefined) state[k] = loaded[k]; });
+
+  state.categories.forEach(c => { if (!state.categoryConfig[c]) state.categoryConfig[c] = { type: "expense", essential: true }; });
+  state.reportCursor = currentMonthKey();
+
+  applyTheme();
+  applyRecurringTemplates();
+  applyRecurringIncomes();
+  recordNetWorthSnapshot();
+  if (state.appPin) state.appLocked = true;
+  render();
+  window.scrollTo(0, 0);
+}
+boot();
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && state.appPin) {
