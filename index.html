@@ -2295,7 +2295,8 @@ function calculateIVTax(inputs) {
     gpm = Math.max(0, bracketTax(AP + otherIncome) - bracketTax(otherIncome));
   }
 
-  const socialBase = Math.max(AP * 0.90, 13836);
+  const rawBase = AP * 0.90;
+  const socialBase = inputs.insuredElsewhere ? rawBase : Math.max(rawBase, 13836);
   const vsd = inputs.firstYearRelief ? 0 : socialBase * 0.1252;
   const psd = inputs.insuredElsewhere ? 0 : Math.max(socialBase * 0.0698, 80.48 * 12);
 
@@ -2518,7 +2519,7 @@ function renderRules() {
         </label>
         ${state.taxCalc.method === "actual" ? `<label class="field">Faktinės metinės sąnaudos (€)<input id="tax_expenses" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.actualExpenses))}" /></label>` : ""}
         <label class="field">Kitos metinės pajamos (alga ir kt., nebūtina)<input id="tax_other" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.otherIncome))}" /></label>
-        <label class="checkbox-field"><input type="checkbox" id="tax_insured" ${state.taxCalc.insuredElsewhere?'checked':''} onchange="state.taxCalc.insuredElsewhere=this.checked;" /> Jau apdraustas kitur — PSD nuo veiklos nereikės</label>
+        <label class="checkbox-field"><input type="checkbox" id="tax_insured" ${state.taxCalc.insuredElsewhere?'checked':''} onchange="state.taxCalc.insuredElsewhere=this.checked;" /> Jau apdraustas kitur (pvz. turi darbą) — PSD nereikės, ir VSD skaičiuosis nuo realaus pelno, ne nuo minimalios bazės</label>
         <label class="checkbox-field"><input type="checkbox" id="tax_firstyear" ${state.taxCalc.firstYearRelief?'checked':''} onchange="state.taxCalc.firstYearRelief=this.checked;" /> Taikoma pirmų metų VSD lengvata</label>
         <button type="submit" class="submit-btn" style="background:var(--rust);">Apskaičiuoti</button>
       </form>
