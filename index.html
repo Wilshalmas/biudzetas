@@ -482,6 +482,10 @@ let state = {
   dataIntegrityWarning: null,
   whatIfResult: null,
   showWrapped: false,
+  remindersEnabled: load("remindersEnabled", false),
+  lastReminderShownAt: load("lastReminderShownAt", null),
+  rolloverResolvedMonths: load("rolloverResolvedMonths", []),
+  showRolloverPrompt: null,
   settingsExpanded: {},
   portfolioImportStep: null,
   portfolioImportRaw: null,
@@ -549,6 +553,9 @@ function persistAll() {
   save("gaugeStyle", state.gaugeStyle);
   save("fontSize", state.fontSize);
   save("categoryViewStyle", state.categoryViewStyle);
+  save("remindersEnabled", state.remindersEnabled);
+  save("lastReminderShownAt", state.lastReminderShownAt);
+  save("rolloverResolvedMonths", state.rolloverResolvedMonths);
   save("theme", state.theme);
   save("lastExportAt", state.lastExportAt);
   save("recurringTemplates", state.recurringTemplates);
@@ -2250,12 +2257,12 @@ function toggleSettingsSection(key) {
 }
 function settingsSectionHeader(key, title, summary) {
   const expanded = !!state.settingsExpanded[key];
-  return `<div onclick="toggleSettingsSection('${key}')" style="display:flex;justify-content:space-between;align-items:center;padding:12px 0;cursor:pointer;">
+  return `<div onclick="toggleSettingsSection('${key}')" style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;cursor:pointer;border:1px solid ${expanded?'var(--gold)':'rgba(237,234,224,0.12)'};border-radius:10px;margin-bottom:8px;background:${expanded?'rgba(201,162,39,0.06)':'transparent'};transition:border-color .2s, background .2s;">
     <div>
       <div style="font-size:14px;font-weight:600;">${title}</div>
       ${summary ? `<div style="font-size:11px;color:var(--faint);margin-top:2px;">${summary}</div>` : ""}
     </div>
-    <span style="color:var(--faint);font-size:18px;transform:rotate(${expanded?90:0}deg);transition:transform .2s;flex-shrink:0;margin-left:10px;">›</span>
+    <span style="color:${expanded?'var(--gold)':'var(--faint)'};font-size:18px;transform:rotate(${expanded?90:0}deg);transition:transform .2s;flex-shrink:0;margin-left:10px;">›</span>
   </div>`;
 }
 function toggleRuleInfo(id) {
@@ -2375,10 +2382,12 @@ function renderRules() {
       </div>
     </div>
 
-    <div class="section-label" style="margin-top:22px;">„Kas jei" taupymo simuliatorius</div>
-    <div class="tip-card" style="border-left-color:var(--gold);">
-      <div style="font-size:12px;color:var(--faint);margin-bottom:10px;">Pasirink kategoriją ir procentą, kiek norėtum sumažinti — paskaičiuosime, kiek sutaupytum per mėnesį ir metus, pagal tavo tikrą vidutinę išlaidą (paskutinių turimų mėnesių vidurkis, iki 3 mėn.).</div>
-      <form class="stack" onsubmit="event.preventDefault(); runWhatIf();">
+    ${ruleInfoCard("whatif", "🔮 „Kas jei” taupymo simuliatorius",
+      "Pasirink kategoriją ir procentą — pamatysi, kiek realiai sutaupytum per metus.",
+      "Šis įrankis paima tavo <b>tikrą</b> vidutinę išlaidą konkrečiai kategorijai (paskutinių turimų mėnesių vidurkis, iki 3 mėn.) ir parodo, kiek sutaupytum, jei sumažintum ją pasirinktu procentu.<br><br>" +
+      "<b>Naudinga:</b> padeda apčiuopiamai pamatyti, kad, pvz., „10% mažiau užsakymų iš Wolt” nėra abstrakcija — tai konkreti €X per metus.<br><br>" +
+      "<b>Apribojimas:</b> kuo ilgiau naudoji programėlę, tuo tikslesnis vidurkis — su vos vienu mėnesio duomenimis įvertinimas gali būti netikslus dėl atsitiktinio mėnesio nukrypimo (pvz. vienkartinis didelis pirkinys).",
+      `<form class="stack" onsubmit="event.preventDefault(); runWhatIf();">
         <label class="field">Kategorija
           <select id="whatif_category">${state.categories.filter(c=>catType(c)==="expense").map(c=>`<option value="${c}">${catEmoji(c)}${c}</option>`).join("")}</select>
         </label>
@@ -2392,18 +2401,69 @@ function renderRules() {
           <div>Vidutiniškai leidi: <span class="tape">€${fmt(w.avgMonthly)}/mėn.</span> (pagal ${w.monthsChecked} mėn.)</div>
           <div style="margin-top:4px;">Sutaupytum: <span class="tape" style="color:var(--green)">€${fmt(w.monthlySavings)}/mėn.</span> · <span class="tape" style="color:var(--green)">€${fmt(w.annualSavings)}/metus</span></div>
         </div>`;
-      })() : ""}
-    </div>
+      })() : ""}`
+    )}
+
+    <div class="section-label" style="margin-top:22px;">Kitos biudžeto metodikos (informacija)</div>
+    ${ruleInfoCard("babysteps", "🐾 Dave Ramsey „Baby Steps”",
+      "7 žingsnių planas skoloms atsikratyti ir turtui kurti, paeiliui, vienas po kito.",
+      "Vienas žinomiausių JAV finansų specialistų Dave Ramsey siūlo griežtą, nuoseklią tvarką — nešokinėti tarp tikslų, o eiti vienas po kito:<br><br>" +
+      "<b>1 žingsnis:</b> €1000 (arba 1 mėn. algos) pradinis avarinis fondas.<br>" +
+      "<b>2 žingsnis:</b> Išmokėti visas skolas (išskyrus būstą) — „Sniego gniūžtės” metodu.<br>" +
+      "<b>3 žingsnis:</b> Pilnas 3-6 mėn. avarinis fondas.<br>" +
+      "<b>4 žingsnis:</b> 15% pajamų — pensijai/ilgalaikiam taupymui.<br>" +
+      "<b>5 žingsnis:</b> Taupymas vaikų mokslui (jei aktualu).<br>" +
+      "<b>6 žingsnis:</b> Būsto paskolos išmokėjimas anksčiau laiko.<br>" +
+      "<b>7 žingsnis:</b> Turto kaupimas ir dalinimasis.<br><br>" +
+      "<span style='color:var(--green);'>+ Labai aiškus, nuoseklus, sumažina „ar teisingai darau” nerimą.</span><br>" +
+      "<span style='color:var(--rust);'>− Griežtai reikalauja atidėti investavimą, kol skolos išmokėtos — matematiškai ne visada optimaliausia, jei paskolų palūkanos žemos.</span><br><br>" +
+      "Ši programėlė gali padėti kiekviename žingsnyje: avarinio fondo sekimas, skolų strategija, taupymo/investicinės kategorijos."
+    )}
+    ${ruleInfoCard("zerobased", "🎯 Nulinis biudžetas (Zero-based)",
+      "Kiekvienas euras turi „darbą” — pajamos minus visos paskirtys (išlaidos+taupymas+investicijos) turi lygtis nuliui.",
+      "Vietoj to, kad tiesiog stebėtum, kiek išleidi, iš anksto <b>priskiri</b> kiekvieną eurą konkrečiai paskirčiai prieš prasidedant mėnesiui.<br><br>" +
+      "<span style='color:var(--green);'>+ Maksimalus sąmoningumas — nė vienas euras „nedingsta” be paaiškinimo.</span><br>" +
+      "<span style='color:var(--rust);'>− Reikalauja daugiau laiko planuojant, gali varginti, jei pajamos nestabilios.</span><br><br>" +
+      "Šioje programėlėje artimiausia realizacija — nustatyti biudžetą <b>kiekvienai</b> kategorijai (įskaitant taupymo/investicines), kad jų suma atitiktų pajamas."
+    )}
+    ${ruleInfoCard("sixjars", "🏺 6 stiklainių metodas",
+      "Pajamos padalinamos į 6 iš anksto nustatytas dalis su fiksuotais procentais.",
+      "T. Harv Eker populiarintas metodas: <b>55%</b> būtiniems poreikiams, <b>10%</b> ilgalaikiam taupymui, <b>10%</b> investicijoms/mokymuisi, <b>10%</b> pramogoms, <b>10%</b> laisvei (finansinei nepriklausomybei), <b>5%</b> labdarai/dovanoms.<br><br>" +
+      "<span style='color:var(--green);'>+ Labai konkretus, lengva pradėti be sudėtingo planavimo.</span><br>" +
+      "<span style='color:var(--rust);'>− Fiksuoti procentai netinka visiems — didelio miesto nuoma dažnai viršija 55% vieną.</span><br><br>" +
+      "Panašus į 50/30/20, tik detalesnis. Gali pritaikyti šios programėlės kategorijas pagal šiuos 6 „stiklainius”, jei toks skaidymas patinka labiau."
+    )}
+    ${ruleInfoCard("payfirst", "💵 „Pay yourself first”",
+      "Taupymą/investavimą atidedi <b>iš karto</b> gavus algą, prieš pradedant leisti — ne tai, kas liks mėnesio pabaigoje.",
+      "Priešingai įprastam elgesiui (leisti, tada taupyti, kas liko), šis principas sako: taupymas — pirmas, ne paskutinis prioritetas.<br><br>" +
+      "<span style='color:var(--green);'>+ Paprasta, veiksminga, nepriklauso nuo valios jėgos mėnesio pabaigoje.</span><br>" +
+      "<span style='color:var(--rust);'>− Reikia realiai žinoti, kiek gali sau leisti taupyti, kad neliktum be pinigų būtinoms išlaidoms.</span><br><br>" +
+      "Praktiškai: nustatyk pasikartojančią „išlaidą” investicinei/taupymo kategorijai su ta pačia data kaip alga — programėlė ją įtrauks automatiškai kiekvieno mėnesio pradžioje."
+    )}
+    ${ruleInfoCard("eighty20", "✂️ 80/20 taisyklė",
+      "Paprastesnė alternatyva 50/30/20 — 20% pajamų taupymui/skoloms, likę 80% — viskam kitam, be smulkaus skaidymo.",
+      "Jei 50/30/20 (ar 6 stiklainiai) atrodo per daug mikroplanavimo, šis metodas siūlo tik <b>vieną</b> taisyklę: atidėk 20%, likusius 80% leisk kaip nori, nedetalizuojant.<br><br>" +
+      "<span style='color:var(--green);'>+ Minimalus planavimas, lengva laikytis ilgą laiką.</span><br>" +
+      "<span style='color:var(--rust);'>− Neduoda įžvalgos, KUR tiksliai eina pinigai — sunkiau pastebėti problemines sritis.</span><br><br>" +
+      "Geras pasirinkimas, jei jau turi gerus finansinius įpročius ir nenori kaskart skaičiuoti kategorijų procentų."
+    )}
 
     <div class="section-label" style="margin-top:22px;">Skolų ir avarinio fondo įrankiai</div>
-    ${settingsSectionHeader('debtstrategy', 'Skolų mokėjimo strategija', loanCats.length ? `${loanCats.length} aktyvi(ų) paskola(ų)` : 'Neturi aktyvių paskolų')}
-    <div class="settings-collapse ${state.settingsExpanded['debtstrategy']?'expanded':''}">
-      ${loanCats.length === 0 ? `<div style="font-size:13px;color:var(--faint);">Kai sukursi paskolos tipo kategoriją, čia atsiras mokėjimo eiliškumo pasiūlymas.</div>` : `
+    ${ruleInfoCard("debtstrategy", "💳 Skolų mokėjimo strategija",
+      loanCats.length ? `${loanCats.length} aktyvi(ų) paskola(ų) — paspausk pasirinkti eiliškumą` : "Neturi aktyvių paskolų — paspausk paskaityti apie strategijas",
+      "Kai turi kelias paskolas, tvarka, kuria jas moki, gali paveikti tiek psichologiją, tiek galutinę permoką.<br><br>" +
+      "<b>🎯 Sniego gniūžtė</b> — moki mažiausią skolą pirmiausia, nepriklausomai nuo palūkanų.<br>" +
+      "<span style='color:var(--green);'>+ Greitas psichologinis laimėjimas, motyvuoja tęsti.</span><br>" +
+      "<span style='color:var(--rust);'>− Gali permokėti daugiau palūkanų, jei mažiausia skola turi mažą palūkaną.</span><br><br>" +
+      "<b>⚡ Lavina</b> — moki daugiausiai ten, kur didžiausios palūkanos.<br>" +
+      "<span style='color:var(--green);'>+ Matematiškai optimaliausia, mažiausiai permoki ilgainiui.</span><br>" +
+      "<span style='color:var(--rust);'>− Gali užtrukti ilgiau iki pirmos pilnai uždarytos skolos, sunkiau išlaikyti motyvaciją.</span><br><br>" +
+      "Abu metodai veikia — geriausias tas, kurio realiai laikysies iki galo.",
+      loanCats.length === 0 ? `<div style="font-size:13px;color:var(--faint);">Kai sukursi paskolos tipo kategoriją, čia atsiras mokėjimo eiliškumo pasiūlymas.</div>` : `
         <div class="toggle-row" style="margin-bottom:10px;">
           <button type="button" class="toggle-btn ${debtStrategy!=='avalanche'?'active blue':''}" onclick="state.debtStrategy='snowball';persistAll();render();">Sniego gniūžtė</button>
           <button type="button" class="toggle-btn ${debtStrategy==='avalanche'?'active blue':''}" onclick="state.debtStrategy='avalanche';persistAll();render();">Lavina</button>
         </div>
-        <div style="font-size:11px;color:var(--faint);margin-bottom:10px;">${debtStrategy==='avalanche' ? "Pirmiausia moki daugiau ten, kur didžiausios palūkanos — mažiausiai permoki ilgainiui." : "Pirmiausia užsidarai mažiausią skolą — greitas psichologinis laimėjimas, motyvuoja tęsti."}</div>
         ${sortedLoans.map((c,i) => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid rgba(237,234,224,0.08);">
           <span>${i+1}. ${catEmoji(c)}${c}${debtStrategy==='avalanche'?` (${Number((state.categoryConfig[c]||{}).interestRate)||0}%)`:''}</span>
           <span class="tape">€${fmt(loanRemaining(c))}</span>
@@ -2412,17 +2472,22 @@ function renderRules() {
           <input id="extra_debt_amount" type="text" inputmode="decimal" placeholder="pvz. 50" />
         </label>
         <button type="button" class="submit-btn" style="margin-top:8px;padding:9px 0;font-size:13px;background:var(--blue);" onclick="applyDebtStrategy()">Nukreipti į „${sortedLoans[0]}”</button>
-      `}
-    </div>
+      `
+    )}
 
-    ${settingsSectionHeader('emergencyfund', 'Avarinis fondas', avgEssential > 0 ? `${Math.round(fundPct)}% pasiekta` : 'Reikia būtinų išlaidų biudžeto')}
-    <div class="settings-collapse ${state.settingsExpanded['emergencyfund']?'expanded':''}">
-      ${avgEssential > 0 ? `
-        <div style="font-size:12px;color:var(--faint);margin-bottom:10px;">Rekomenduojama turėti bent 3 mėn. būtinų išlaidų atsargą nenumatytiems atvejams.</div>
+    ${ruleInfoCard("emergencyfund", "🛟 Avarinis fondas",
+      avgEssential > 0 ? `${Math.round(fundPct)}% pasiekta iki 3 mėn. tikslo` : "Reikia būtinų išlaidų biudžeto — paspausk paskaityti",
+      "Avarinis fondas — pinigai, atidėti tik nenumatytiems atvejams (darbo netekimas, sveikatos problema, skubus remontas), ne kasdieniam naudojimui.<br><br>" +
+      "<b>Kodėl 3 mėnesiai?</b> Dažniausiai minima minimali riba — tiek laiko realistiškai užtrunka susirasti naują darbą ar susitvarkyti finansus po netikėto smūgio.<br>" +
+      "<span style='color:var(--green);'>+ Pakankama apsauga daugumai atvejų, greičiau pasiekiamas tikslas.</span><br>" +
+      "<span style='color:var(--rust);'>− Gali neužtekti, jei darbas nestabilus (laisvai samdomas, sezoninis).</span><br><br>" +
+      "<b>Kai kurie specialistai (pvz. Dave Ramsey) siūlo pradėti nuo mažesnio, greito tikslo</b> — pvz. €1000 „pradinio” fondo, kol susitvarkai su skolomis, o pilną 3-6 mėn. fondą kaupti jau po to (žr. „Baby Steps” žemiau).<br><br>" +
+      "<b>Kur laikyti?</b> Lengvai pasiekiamoje vietoje (taupomoji sąskaita), ne investicijose — svarbu greitas priėjimas, ne augimas.",
+      avgEssential > 0 ? `
         <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;"><span>€${fmt(state.savingsBalance)} iš €${fmt(targetFund)}</span><span class="tape">${Math.round(fundPct)}%</span></div>
         <div class="bar-track"><div class="bar-fill" style="width:${fundPct}%;background:var(--green);"></div></div>
-      ` : `<div style="font-size:13px;color:var(--faint);">Pažymėk bent vieną kategoriją kaip „būtina" ir nustatyk jos biudžetą, kad galėtume paskaičiuoti tikslą.</div>`}
-    </div>
+      ` : `<div style="font-size:13px;color:var(--faint);">Pažymėk bent vieną kategoriją kaip „būtina” ir nustatyk jos biudžetą, kad galėtume paskaičiuoti tikslą.</div>`
+    )}
 
     <div class="section-label" style="margin-top:22px;">Didelio pirkinio taisyklės (informacija)</div>
     ${ruleInfoCard("car", "🚗 Automobilio pirkimas — „20/4/10”",
@@ -2454,38 +2519,39 @@ function renderRules() {
       "<b>Svarbu:</b> kuo anksčiau pradedi, tuo mažiau reikia įnešti kas mėnesį dėl ilgesnio augimo laiko — net nedidelė suma, pradėta anksti, ilgainiui gali aplenkti didesnę, pradėtą vėlai."
     )}
 
-    ${settingsSectionHeader('purchasecalc', 'Naujo pirkinio / paskolos skaičiuoklė', 'Patikrink, ar saugu skolintis')}
-    <div class="settings-collapse ${state.settingsExpanded['purchasecalc']?'expanded':''}">
-    <form class="stack" onsubmit="event.preventDefault(); runCalculator();">
-      <label class="field">Tipas
-        <select id="calc_type">
-          <option value="car" ${state.calcType==='car'?'selected':''}>Automobilis</option>
-          <option value="house" ${state.calcType==='house'?'selected':''}>Būstas</option>
-          <option value="other" ${state.calcType==='other'?'selected':''}>Kita (vartojimo kreditas ir pan.)</option>
-        </select>
-      </label>
-      <label class="field">Kaina (€)<input id="calc_price" type="text" inputmode="decimal" placeholder="pvz. 15000" /></label>
-      <label class="field">Pradinis įnašas (€)<input id="calc_down" type="text" inputmode="decimal" placeholder="pvz. 3000" /></label>
-      <div style="display:flex;gap:8px;">
-        <label class="field" style="flex:1;">Terminas (metais)<input id="calc_years" type="text" inputmode="decimal" placeholder="pvz. 4" /></label>
-        <label class="field" style="flex:1;">Metinė palūkana (%)<input id="calc_rate" type="text" inputmode="decimal" placeholder="pvz. 7" /></label>
-      </div>
-      <button type="submit" class="submit-btn" style="background:var(--blue);">Apskaičiuoti</button>
-    </form>
-
-    ${r ? `
-      <div class="tip-card" style="border-left-color:${verdictColor(r.verdict)};margin-top:14px;">
-        <div style="font-weight:700;color:${verdictColor(r.verdict)};margin-bottom:8px;">${verdictLabel(r.verdict)}</div>
-        <div style="display:flex;flex-direction:column;gap:4px;font-size:13px;margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;"><span>Mėnesio įmoka</span><span class="tape">€${fmt(r.monthly)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>Iš viso permokėsi (palūkanos)</span><span class="tape">€${fmt(r.totalInterest)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>Visa kaina su palūkanomis</span><span class="tape">€${fmt(r.totalPaid)}</span></div>
+    ${ruleInfoCard("purchasecalc", "🧮 Naujo pirkinio / paskolos skaičiuoklė",
+      "Patikrink, ar saugu skolintis — realus skaičiavimas pagal tavo pajamas.",
+      "Įvedi kainą, pradinį įnašą, terminą ir palūkaną — skaičiuoklė apskaičiuoja tikslią mėnesio įmoką (tikra amortizacijos formulė, ne apytikslis skaičius), kiek iš viso permokėsi palūkanomis, ir įvertina, ar saugu skolintis, palygindama su atitinkama taisykle (20/4/10 automobiliui, 28/36 būstui, arba bendra 30% riba kitiems atvejams) <b>ir</b> tavo realia pajamų baze bei jau turimomis paskolomis, ne su bendra teorija.<br><br>" +
+      "Jei rezultatas atrodo saugus, gali iš karto sukurti šį pirkinį kaip paskolos kategoriją — teisinga įmoka ir bendra suma bus jau užpildytos.",
+      `<form class="stack" onsubmit="event.preventDefault(); runCalculator();">
+        <label class="field">Tipas
+          <select id="calc_type">
+            <option value="car" ${state.calcType==='car'?'selected':''}>Automobilis</option>
+            <option value="house" ${state.calcType==='house'?'selected':''}>Būstas</option>
+            <option value="other" ${state.calcType==='other'?'selected':''}>Kita (vartojimo kreditas ir pan.)</option>
+          </select>
+        </label>
+        <label class="field">Kaina (€)<input id="calc_price" type="text" inputmode="decimal" placeholder="pvz. 15000" /></label>
+        <label class="field">Pradinis įnašas (€)<input id="calc_down" type="text" inputmode="decimal" placeholder="pvz. 3000" /></label>
+        <div style="display:flex;gap:8px;">
+          <label class="field" style="flex:1;">Terminas (metais)<input id="calc_years" type="text" inputmode="decimal" placeholder="pvz. 4" /></label>
+          <label class="field" style="flex:1;">Metinė palūkana (%)<input id="calc_rate" type="text" inputmode="decimal" placeholder="pvz. 7" /></label>
         </div>
-        ${r.checks.map(c => `<div class="insight" style="color:${verdictColor(c.tone)};margin-bottom:6px;">${c.tone==='ok'?ICONS.check:ICONS.alert}<span style="color:var(--paper);">${c.text}</span></div>`).join("")}
-        <button type="button" class="submit-btn" style="margin-top:8px;padding:9px 0;font-size:13px;" onclick="createLoanFromCalculator()">Sukurti kaip paskolos kategoriją</button>
-      </div>
-    ` : ""}
-    </div>
+        <button type="submit" class="submit-btn" style="background:var(--blue);">Apskaičiuoti</button>
+      </form>
+      ${r ? `
+        <div class="tip-card" style="border-left-color:${verdictColor(r.verdict)};margin-top:14px;">
+          <div style="font-weight:700;color:${verdictColor(r.verdict)};margin-bottom:8px;">${verdictLabel(r.verdict)}</div>
+          <div style="display:flex;flex-direction:column;gap:4px;font-size:13px;margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;"><span>Mėnesio įmoka</span><span class="tape">€${fmt(r.monthly)}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Iš viso permokėsi (palūkanos)</span><span class="tape">€${fmt(r.totalInterest)}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Visa kaina su palūkanomis</span><span class="tape">€${fmt(r.totalPaid)}</span></div>
+          </div>
+          ${r.checks.map(c => `<div class="insight" style="color:${verdictColor(c.tone)};margin-bottom:6px;">${c.tone==='ok'?ICONS.check:ICONS.alert}<span style="color:var(--paper);">${c.text}</span></div>`).join("")}
+          <button type="button" class="submit-btn" style="margin-top:8px;padding:9px 0;font-size:13px;" onclick="createLoanFromCalculator()">Sukurti kaip paskolos kategoriją</button>
+        </div>
+      ` : ""}`
+    )}
 
     <div class="section-label" style="margin-top:22px;">Investicijų mokesčiai (informacija)</div>
     ${ruleInfoCard("stocktax", "📈 Akcijų/investicijų pardavimo mokesčiai",
@@ -3156,7 +3222,7 @@ function renderSettings() {
 
   return `<div class="topbar" style="display:flex;align-items:center;justify-content:space-between;">
     <div class="eyebrow">Nustatymai</div>
-    <button class="icon-btn" onclick="state.showHelp=true;render();" aria-label="Pagalba" style="border:1px solid rgba(237,234,224,0.15);border-radius:50%;width:26px;height:26px;justify-content:center;">?</button>
+    <button class="icon-btn" onclick="state.showHelp=true;render();" aria-label="Pagalba" style="border:1px solid rgba(237,234,224,0.15);border-radius:14px;padding:5px 12px;font-size:12px;">Pagalba</button>
   </div>
   <div class="tabpanel fade-in">
     <div style="display:flex;align-items:center;justify-content:space-between;">
@@ -3233,6 +3299,11 @@ function renderSettings() {
       <span class="field-row-label">Programėlės užraktas (PIN)</span>
       <button type="button" onclick="${state.appPin ? 'disableAppPin()' : 'promptSetPin()'}" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.appPin?'var(--green)':'rgba(237,234,224,0.15)'};background:${state.appPin?'rgba(111,191,115,0.12)':'transparent'};color:${state.appPin?'var(--green)':'var(--faint)'};">${state.appPin ? 'Įjungtas ✓' : 'Nustatyti'}</button>
     </div>
+    <div class="field-row">
+      <span class="field-row-label">Priminimai neįrašius kelias dienas</span>
+      <button type="button" onclick="toggleReminders(${state.remindersEnabled ? 'false' : 'true'})" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.remindersEnabled?'var(--green)':'rgba(237,234,224,0.15)'};background:${state.remindersEnabled?'rgba(111,191,115,0.12)':'transparent'};color:${state.remindersEnabled?'var(--green)':'var(--faint)'};">${state.remindersEnabled ? 'Įjungti ✓' : 'Įjungti'}</button>
+    </div>
+    <div class="field-row-hint">Paspaudus pranešimą, atsidarys pati programėlė. Svarbu žinoti: kadangi programėlė neturi serverio, pranešimas gali atsirasti tik tada, kai atidarai programėlę po pertraukos — negalime „pažadinti" jos, kol ji visiškai uždaryta.</div>
   </div>`;
 }
 function promptSetPin() {
@@ -3290,7 +3361,105 @@ function updateBudgetStartDay(val) {
 }
 function setGaugeStyle(style) { state.gaugeStyle = style; persistAll(); render(); }
 function setFontSize(size) { state.fontSize = size; persistAll(); render(); }
+
+async function toggleReminders(enabled) {
+  if (enabled) {
+    if (!("Notification" in window)) { alert("Šis naršyklė nepalaiko pranešimų."); return; }
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { alert("Leidimas nesuteiktas — priminimai neveiks."); return; }
+  }
+  state.remindersEnabled = enabled;
+  persistAll(); render();
+}
+function daysSinceLastEntry() {
+  const all = [...state.expenses, ...state.incomes];
+  if (all.length === 0) return null;
+  const latest = all.reduce((max, e) => e.date > max ? e.date : max, all[0].date);
+  const latestDate = new Date(latest + "T00:00:00");
+  const today = new Date(); today.setHours(0,0,0,0);
+  return Math.floor((today - latestDate) / 86400000);
+}
+async function checkAndShowReminder() {
+  if (!state.remindersEnabled) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const days = daysSinceLastEntry();
+  if (days === null || days < 3) return;
+  const today = new Date().toISOString().slice(0,10);
+  if (state.lastReminderShownAt === today) return;
+  state.lastReminderShownAt = today;
+  save("lastReminderShownAt", today);
+  try {
+    if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+      const reg = await navigator.serviceWorker.ready;
+      reg.showNotification("Biudžeto knyga", {
+        body: `Jau ${days} d. neįrašei jokios išlaidos ar pajamos — atidaryk, kad nepamirštum.`,
+        icon: "icon-192.png",
+        badge: "icon-192.png",
+      });
+    } else {
+      new Notification("Biudžeto knyga", { body: `Jau ${days} d. neįrašei jokios išlaidos ar pajamos.`, icon: "icon-192.png" });
+    }
+  } catch (_) {}
+}
 function setCategoryViewStyle(style) { state.categoryViewStyle = style; persistAll(); render(); }
+
+function computeUnusedBudget(monthKey) {
+  const d = monthData(monthKey, "budget");
+  const expenseCats = state.categories.filter(c => catType(c) === "expense");
+  const rows = expenseCats.map(c => {
+    const budget = effectiveBudget(c, monthKey, "budget");
+    const spent = d.byCategory[c] || 0;
+    const unused = Math.max(0, budget - spent);
+    return { category: c, budget, spent, unused };
+  }).filter(r => r.budget > 0 && r.unused > 0.01);
+  const total = rows.reduce((s,r) => s + r.unused, 0);
+  return { rows, total };
+}
+function checkBudgetRollover() {
+  const prevKey = shiftedMonthKey(currentMonthKey(), -1);
+  if (state.rolloverResolvedMonths.includes(prevKey)) return;
+  if (!monthHasData(prevKey, "budget")) return;
+  const { total } = computeUnusedBudget(prevKey);
+  if (total <= 0.01) { state.rolloverResolvedMonths.push(prevKey); save("rolloverResolvedMonths", state.rolloverResolvedMonths); return; }
+  state.showRolloverPrompt = prevKey;
+}
+function renderRolloverPrompt() {
+  const monthKey = state.showRolloverPrompt;
+  const { rows, total } = computeUnusedBudget(monthKey);
+  return `<div class="topbar"><div class="eyebrow">Nepanaudotas biudžetas</div></div>
+  <div class="tabpanel fade-in">
+    <div style="font-size:14px;margin-bottom:14px;">${monthLabel(monthKey)} liko nepanaudoto biudžeto. Perkelti į santaupas?</div>
+    ${rows.map(r => `<div class="ledger-row" style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;">
+      <span>${catEmoji(r.category)}${escapeHtml(r.category)}</span>
+      <span class="tape" style="color:var(--green)">+€${fmt(r.unused)}</span>
+    </div>`).join("")}
+    <div style="display:flex;justify-content:space-between;font-weight:700;padding:10px 0;border-top:1px solid rgba(237,234,224,0.1);margin-top:8px;">
+      <span>Iš viso</span><span class="tape" style="color:var(--green)">€${fmt(total)}</span>
+    </div>
+    <div style="font-size:11px;color:var(--faint);margin-top:8px;">Atšaukus, niekas niekur nesikels — likutis tiesiog liks neįskaičiuotas.</div>
+    <div style="display:flex;gap:8px;margin-top:16px;">
+      <button type="button" class="submit-btn" style="flex:1;width:auto;background:var(--green);" onclick="confirmRollover()">Perkelti į santaupas</button>
+      <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:0 18px;" onclick="cancelRollover()">Ne, ačiū</button>
+    </div>
+  </div>`;
+}
+function confirmRollover() {
+  const monthKey = state.showRolloverPrompt;
+  const { total } = computeUnusedBudget(monthKey);
+  const oldBalance = state.savingsBalance;
+  state.savingsBalance += total;
+  state.savingsLog.unshift({ date: new Date().toISOString().slice(0,10), from: oldBalance, to: state.savingsBalance });
+  state.savingsLog = state.savingsLog.slice(0, 20);
+  state.rolloverResolvedMonths.push(monthKey);
+  state.showRolloverPrompt = null;
+  persistAll(); render();
+  showToast(`€${fmt(total)} perkelta į santaupas`);
+}
+function cancelRollover() {
+  state.rolloverResolvedMonths.push(state.showRolloverPrompt);
+  state.showRolloverPrompt = null;
+  persistAll(); render();
+}
 function daysSinceExport() {
   if (!state.lastExportAt) return null;
   return Math.floor((Date.now() - new Date(state.lastExportAt).getTime()) / 86400000);
@@ -3681,6 +3850,7 @@ function render() {
     if (pi) pi.focus();
     return;
   }
+  if (state.showRolloverPrompt) { app.innerHTML = renderRolloverPrompt(); return; }
   if (state.showHelp) { app.innerHTML = renderHelp(); return; }
   if (state.showWrapped) { app.innerHTML = renderWrapped(); return; }
   if (state.importStep === "mapping") { app.innerHTML = renderImportMapping(); return; }
@@ -3720,7 +3890,7 @@ function setTab(t) {
   render();
 }
 
-const PERSISTED_KEYS = ["expenses","incomes","budgets","categories","categoryConfig","baseIncome","gaugeStyle","theme","lastExportAt","recurringTemplates","budgetStartDay","savingsBalance","savingsGoalMin","savingsLog","merchantMap","importedHashes","appPin","debtStrategy","appliedRules","ruleSnapshots","netWorthHistory","recurringIncomes","csvMappingMemory","holdings","finnhubApiKey","cryptoHoldings","fontSize","categoryViewStyle"];
+const PERSISTED_KEYS = ["expenses","incomes","budgets","categories","categoryConfig","baseIncome","gaugeStyle","theme","lastExportAt","recurringTemplates","budgetStartDay","savingsBalance","savingsGoalMin","savingsLog","merchantMap","importedHashes","appPin","debtStrategy","appliedRules","ruleSnapshots","netWorthHistory","recurringIncomes","csvMappingMemory","holdings","finnhubApiKey","cryptoHoldings","fontSize","categoryViewStyle","remindersEnabled","lastReminderShownAt","rolloverResolvedMonths"];
 
 const KEY_SCHEMA = {
   expenses: "array", incomes: "array", budgets: "object", categories: "array", categoryConfig: "object",
@@ -3732,6 +3902,9 @@ const KEY_SCHEMA = {
   cryptoHoldings: "array",
   fontSize: "string",
   categoryViewStyle: "string",
+  remindersEnabled: "boolean",
+  lastReminderShownAt: "string",
+  rolloverResolvedMonths: "array",
 };
 function typeMatches(val, expected) {
   if (val === null || val === undefined) return true;
@@ -3739,6 +3912,7 @@ function typeMatches(val, expected) {
   if (expected === "object") return typeof val === "object" && !Array.isArray(val);
   if (expected === "number") return typeof val === "number" && !isNaN(val);
   if (expected === "string") return typeof val === "string";
+  if (expected === "boolean") return typeof val === "boolean";
   return true;
 }
 
@@ -3773,6 +3947,8 @@ async function boot() {
   applyRecurringTemplates();
   applyRecurringIncomes();
   recordNetWorthSnapshot();
+  checkAndShowReminder();
+  checkBudgetRollover();
   if (state.appPin) state.appLocked = true;
   render();
   window.scrollTo(0, 0);
