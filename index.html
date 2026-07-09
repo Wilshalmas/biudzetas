@@ -348,6 +348,7 @@ let state = {
   taxCalc: { income: "", method: "30pct", actualExpenses: "", otherIncome: "", insuredElsewhere: false, firstYearRelief: false },
   taxCalcResult: null,
   detectedSubscriptions: [],
+  settingsExpanded: {},
   portfolioImportStep: null,
   portfolioImportRaw: null,
   portfolioImportMapping: { symbolCol: null, qtyCol: null, amountCol: null, priceCol: null, actionCol: null, amountMode: "total" },
@@ -2004,6 +2005,20 @@ function netWorthTrendSVG() {
   </svg>`;
 }
 
+function toggleSettingsSection(key) {
+  state.settingsExpanded[key] = !state.settingsExpanded[key];
+  render();
+}
+function settingsSectionHeader(key, title, summary) {
+  const expanded = !!state.settingsExpanded[key];
+  return `<div onclick="toggleSettingsSection('${key}')" style="display:flex;justify-content:space-between;align-items:center;padding:12px 0;cursor:pointer;">
+    <div>
+      <div style="font-size:14px;font-weight:600;">${title}</div>
+      ${summary ? `<div style="font-size:11px;color:var(--faint);margin-top:2px;">${summary}</div>` : ""}
+    </div>
+    <span style="color:var(--faint);font-size:18px;transform:rotate(${expanded?90:0}deg);transition:transform .2s;flex-shrink:0;margin-left:10px;">›</span>
+  </div>`;
+}
 function toggleRuleInfo(id) {
   state.expandedRuleInfo[id] = !state.expandedRuleInfo[id];
   render();
@@ -2583,7 +2598,10 @@ function renderSettings() {
       <button type="submit" class="submit-btn">${ICONS.plus} Pridėti kategoriją</button>
     </form>
 
-    <div class="section-label" style="margin-top:24px;">Pasikartojančios išlaidos</div>
+    <div class="section-label" style="margin-top:30px;font-size:15px;">💰 Finansai ir importas</div>
+
+    ${settingsSectionHeader('recurexp', 'Pasikartojančios išlaidos', state.recurringTemplates.length ? `${state.recurringTemplates.length} šablon(ai/ų) · €${fmt(state.recurringTemplates.reduce((s,t)=>s+Number(t.amount),0))}/mėn.` : 'Nėra pridėtų')}
+    ${state.settingsExpanded['recurexp'] ? `
     ${recurringRows || `<div class="empty">Nėra pasikartojančių išlaidų.</div>`}
     <form class="stack" style="margin-top:12px;" onsubmit="return submitAddRecurring(event)">
       <div style="display:flex;gap:8px;">
@@ -2594,9 +2612,10 @@ function renderSettings() {
       <button type="submit" class="submit-btn">${ICONS.plus} Pridėti pasikartojančias išlaidas</button>
     </form>
     <div style="font-size:12px;color:var(--faint);margin-top:8px;">Kiekvieno mėnesio 1 dieną automatiškai pridedama kaip išlaida.</div>
-    ${state.recurringTemplates.length > 0 ? `<div style="font-size:12px;color:var(--faint);margin-top:6px;">Iš viso pasikartojančių išlaidų: <span class="tape" style="color:var(--paper);">€${fmt(state.recurringTemplates.reduce((s,t)=>s+Number(t.amount),0))}/mėn.</span></div>` : ""}
+    ` : ""}
 
-    <div class="section-label" style="margin-top:18px;">Galimos prenumeratos / pasikartojančios išlaidos</div>
+    ${settingsSectionHeader('subscan', 'Galimos prenumeratos', state.detectedSubscriptions.length ? `${state.detectedSubscriptions.length} rasta` : 'Ieškoti pasikartojančių mokėjimų')}
+    ${state.settingsExpanded['subscan'] ? `
     <div style="font-size:11px;color:var(--faint);margin-bottom:10px;">Peržiūri tavo išlaidų istoriją ir suranda mokėjimus, kurie kartojasi tą pačią sumą bent 3 skirtingus mėnesius, bet dar nepaversti į pasikartojančias.</div>
     <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);margin-bottom:10px;" onclick="runSubscriptionScan()">Ieškoti pasikartojančių mokėjimų</button>
     ${state.detectedSubscriptions.map((c,idx) => `
@@ -2611,8 +2630,10 @@ function renderSettings() {
           <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);flex:0 0 auto;width:auto;padding:6px 14px;font-size:12px;" onclick="dismissDetectedSubscription(${idx})">Ne, ačiū</button>
         </div>
       </div>`).join("")}
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Pasikartojančios pajamos</div>
+    ${settingsSectionHeader('recurinc', 'Pasikartojančios pajamos', state.recurringIncomes.length ? `${state.recurringIncomes.length} šablon(ai/ų)` : 'Nėra pridėtų')}
+    ${state.settingsExpanded['recurinc'] ? `
     ${recurringIncomeRows || `<div class="empty">Nėra pasikartojančių pajamų.</div>`}
     <form class="stack" style="margin-top:12px;" onsubmit="return submitAddRecurringIncome(event)">
       <div style="display:flex;gap:8px;">
@@ -2622,14 +2643,18 @@ function renderSettings() {
       <button type="submit" class="submit-btn" style="background:var(--green);">${ICONS.plus} Pridėti pasikartojančias pajamas</button>
     </form>
     <div style="font-size:12px;color:var(--faint);margin-top:8px;">Kiekvieno mėnesio 1 dieną automatiškai pridedama kaip pajama (pvz. pastovi alga).</div>
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Banko išrašo importas</div>
+    ${settingsSectionHeader('bankimport', 'Banko išrašo importas', 'Įkelti CSV failą')}
+    ${state.settingsExpanded['bankimport'] ? `
     <label class="submit-btn" style="background:var(--blue);color:var(--ink);text-align:center;">
       ${ICONS.plus} Importuoti CSV failą<input type="file" accept=".csv,.txt,text/csv,text/plain,*/*" style="display:none;" onchange="handleCsvFile(this)" />
     </label>
     <div style="font-size:12px;color:var(--faint);margin-top:8px;">Įkelk iš banko atsisiųstą CSV išrašą — programėlė pasiūlys stulpelių atitikmenis ir kategorijas, tu peržiūri prieš patvirtindamas.</div>
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Investicijų portfelis</div>
+    ${settingsSectionHeader('stocks', 'Investicijų portfelis', state.holdings.length ? `${state.holdings.length} laikym(ai/ų)` : 'Nėra pridėtų')}
+    ${state.settingsExpanded['stocks'] ? `
     <div class="field-row">
       <span class="field-row-label">Finnhub API raktas</span>
     </div>
@@ -2653,8 +2678,10 @@ function renderSettings() {
       ${ICONS.plus} Importuoti iš brokerio CSV<input type="file" accept=".csv,.txt,text/csv,text/plain,*/*" style="display:none;" onchange="handlePortfolioCsvFile(this)" />
     </label>
     <div style="font-size:11px;color:var(--faint);margin-top:8px;">Įkelk brokerio (pvz. Revolut Trading, IBKR) operacijų istorijos CSV — programėlė susumuos pirkimus pagal tikslą.</div>
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Kriptovaliutų portfelis</div>
+    ${settingsSectionHeader('crypto', 'Kriptovaliutų portfelis', state.cryptoHoldings.length ? `${state.cryptoHoldings.length} laikym(ai/ų)` : 'Nėra pridėtų')}
+    ${state.settingsExpanded['crypto'] ? `
     <div style="font-size:11px;color:var(--faint);margin-bottom:12px;">Kainos gaunamos iš CoinGecko — nemokamai, be jokio rakto. Įvesk CoinGecko ID, ne trumpinį (pvz. „bitcoin", ne „BTC"; „ethereum", ne „ETH").</div>
     ${cryptoRows || `<div class="empty">Nėra pridėtų kripto laikymų.</div>`}
     <form class="stack" style="margin-top:12px;" onsubmit="return submitAddCrypto(event)">
@@ -2667,8 +2694,10 @@ function renderSettings() {
     </form>
     <div style="font-size:11px;color:var(--faint);margin-top:8px;margin-bottom:14px;">Jei tikslas jau yra, nauji vienetai/suma pridedami prie esamų.</div>
     <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);" ${state.cryptoPriceRefreshing?'disabled':''} onclick="refreshCryptoPrices()">${state.cryptoPriceRefreshing ? "Atnaujinama…" : "Atnaujinti kripto kainas"}</button>
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Atsarginė kopija</div>
+    ${settingsSectionHeader('backup', 'Atsarginė kopija', 'Eksportuoti / importuoti duomenis')}
+    ${state.settingsExpanded['backup'] ? `
     <div style="display:flex;gap:8px;">
       <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);" onclick="exportData()">Eksportuoti</button>
       <label class="submit-btn" style="background:var(--surface-light);color:var(--paper);text-align:center;">
@@ -2677,15 +2706,19 @@ function renderSettings() {
     </div>
     ${exportReminder}
     <button type="button" class="submit-btn" style="background:var(--surface-light);color:var(--paper);margin-top:8px;" onclick="exportCSV()">Eksportuoti CSV (Excel/Sheets)</button>
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Mano biudžeto mėnuo</div>
+    ${settingsSectionHeader('budgetday', 'Mano biudžeto mėnuo', `Prasideda ${state.budgetStartDay || 1} d.`)}
+    ${state.settingsExpanded['budgetday'] ? `
     <div class="field-row">
       <span class="field-row-label">Prasideda mėnesio dieną</span>
       <div class="field-row-input"><input type="number" min="1" max="28" value="${state.budgetStartDay || 1}" onchange="updateBudgetStartDay(this.value)" /></div>
     </div>
     <div class="field-row-hint">Jei algą gauni ne 1-ą dieną (pvz. 15-ą), nustatyk tą dieną — Apžvalga rodys tavo asmeninį mėnesį, o Ataskaitoje galėsi rinktis tarp jo ir kalendorinio.</div>
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Santaupos</div>
+    ${settingsSectionHeader('savingscfg', 'Santaupos', `€${fmt(state.savingsBalance)}`)}
+    ${state.settingsExpanded['savingscfg'] ? `
     <div class="field-row">
       <span class="field-row-label">Dabartinė santaupų suma</span>
       <div class="field-row-input"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.savingsBalance}" onchange="updateSavingsBalance(this.value)" /></div>
@@ -2714,13 +2747,16 @@ function renderSettings() {
       return `<div class="section-label" style="margin-top:16px;">Kelionių / įvykių išlaidos (iš santaupų)</div>
         ${keys.map(k => `<div class="ledger-row" style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;"><span>${escapeHtml(k)}</span><span class="tape">€${fmt(groups[k])}</span></div>`).join("")}`;
     })()}
+    ` : ""}
 
-    <div class="section-label" style="margin-top:24px;">Pajamų bazė (proporcingam biudžetui)</div>
+    ${settingsSectionHeader('incomebase', 'Pajamų bazė (proporcingam biudžetui)', state.baseIncome ? `€${fmt(state.baseIncome)}/mėn.` : 'Išjungta')}
+    ${state.settingsExpanded['incomebase'] ? `
     <div class="field-row">
       <span class="field-row-label">Bazinis mėnesio atlyginimas</span>
       <div class="field-row-input"><span style="color:var(--faint)">€</span><input type="text" inputmode="decimal" value="${state.baseIncome || ''}" placeholder="pvz. 1000" onchange="updateBaseIncome(this.value)" /></div>
     </div>
     <div class="field-row-hint">Kai pajamos skiriasi nuo šios sumos, „lanksčių” kategorijų biudžetai automatiškai proporcingai padidėja arba sumažėja. „Būtinos” kategorijos (pvz. sąskaitos) nesikeičia. 0 = išjungta.</div>
+    ` : ""}
 
     <div class="section-label" style="margin-top:28px;">Išvaizda ir sauga</div>
     <div class="field-row">
