@@ -632,13 +632,14 @@ function updateCategoryTargetAmount(name, val) {
 }
 function requiredMonthlyForGoal(c) {
   const cfg = state.categoryConfig[c] || {};
-  if (!cfg.targetDate || !cfg.targetAmount) return null;
+  if (!cfg.targetAmount) return null;
+  const already = allTimePaidForCategory(c);
+  const remaining = Math.max(0, cfg.targetAmount - already);
+  if (!cfg.targetDate) return { monthly: null, months: null, remaining, targetAmount: cfg.targetAmount };
   const target = new Date(cfg.targetDate + "T00:00:00");
   const today = new Date();
   let months = (target.getFullYear() - today.getFullYear()) * 12 + (target.getMonth() - today.getMonth());
   months = Math.max(1, months);
-  const already = allTimePaidForCategory(c);
-  const remaining = Math.max(0, cfg.targetAmount - already);
   return { monthly: remaining / months, months, remaining, targetAmount: cfg.targetAmount };
 }
 function updateBaseIncome(val) { state.baseIncome = parseFloat(String(val).replace(",",".")) || 0; persistAll(); render(); }
@@ -1149,7 +1150,9 @@ function catRow(c, monthKey, d, mode, clickable) {
     amountLabel = target > 0 ? `€${fmt(spent)} iš €${fmt(target)}` : `€${fmt(spent)}`;
     if (isSavingsGoal) {
       const proj = requiredMonthlyForGoal(c);
-      if (proj) subLine = `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Tikslas €${fmt(proj.targetAmount)} · reikia €${fmt(proj.monthly)}/mėn. (${proj.months} mėn. liko)</div>`;
+      if (proj) subLine = proj.monthly !== null
+        ? `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Tikslas €${fmt(proj.targetAmount)} · reikia €${fmt(proj.monthly)}/mėn. (${proj.months} mėn. liko)</div>`
+        : `<div style="font-size:11px;color:var(--faint);margin-top:3px;">Tikslas €${fmt(proj.targetAmount)} · liko €${fmt(proj.remaining)}</div>`;
     }
   } else if (isLoan) {
     const total = loanTotalFor(c);
@@ -1697,6 +1700,25 @@ function createLoanFromCalculator() {
   render();
   showToast("Paskolos kategorija sukurta Nustatymuose");
 }
+function applyDebtStrategy() {
+  const loanCats = state.categories.filter(c => catType(c) === "loan").filter(c => loanRemaining(c) > 0);
+  if (loanCats.length === 0) return;
+  const strategy = state.debtStrategy || "snowball";
+  const sorted = [...loanCats].sort((a,b) => {
+    if (strategy === "avalanche") {
+      const ra = Number((state.categoryConfig[a]||{}).interestRate)||0, rb = Number((state.categoryConfig[b]||{}).interestRate)||0;
+      return rb - ra;
+    }
+    return loanRemaining(a) - loanRemaining(b);
+  });
+  const extraInput = document.getElementById("extra_debt_amount");
+  const extra = parseFloat(String(extraInput ? extraInput.value : "0").replace(",", ".")) || 0;
+  const target = sorted[0];
+  const base = Number((state.categoryConfig[target]||{}).minPayment) || 0;
+  state.categoryConfig[target].minPayment = base + extra;
+  persistAll(); render();
+  showToast(`„${target}” min. įmoka padidinta €${fmt(extra)}`);
+}
 function toggleBudgetRule(ruleId) {
   if (state.appliedRules[ruleId]) {
     const snap = state.ruleSnapshots[ruleId];
@@ -2028,15 +2050,16 @@ function toggleRuleInfo(id) {
   state.expandedRuleInfo[id] = !state.expandedRuleInfo[id];
   render();
 }
-function ruleInfoCard(id, title, summary, details) {
+function ruleInfoCard(id, title, summary, details, extra) {
   const expanded = !!state.expandedRuleInfo[id];
-  return `<div class="tip-card" style="border-left-color:var(--blue);cursor:pointer;" onclick="toggleRuleInfo('${id}')">
-    <div style="display:flex;align-items:center;justify-content:space-between;">
+  return `<div class="tip-card" style="border-left-color:var(--blue);">
+    <div onclick="toggleRuleInfo('${id}')" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;">
       <div style="font-weight:600;">${title}</div>
       <span style="color:var(--faint);font-size:16px;transform:rotate(${expanded?90:0}deg);transition:transform .2s;">›</span>
     </div>
-    <div style="font-size:12px;color:var(--faint);margin-top:4px;">${summary}</div>
+    <div onclick="toggleRuleInfo('${id}')" style="cursor:pointer;font-size:12px;color:var(--faint);margin-top:4px;">${summary}</div>
     ${expanded ? `<div style="font-size:12px;color:var(--faint);margin-top:10px;padding-top:10px;border-top:1px solid rgba(237,234,224,0.08);line-height:1.6;">${details}</div>` : ""}
+    ${expanded && extra ? `<div style="margin-top:12px;">${extra}</div>` : ""}
   </div>`;
 }
 
@@ -2089,6 +2112,21 @@ function renderRules() {
   const verdictColor = t => t === "ok" ? "var(--green)" : t === "warn" ? "var(--gold)" : "var(--rust)";
   const verdictLabel = t => t === "ok" ? "Atrodo saugu" : t === "warn" ? "Reikia daugiau info" : "Rizikinga";
 
+  const loanCats = state.categories.filter(c => catType(c) === "loan").filter(c => loanRemaining(c) > 0);
+  const debtStrategy = state.debtStrategy || "snowball";
+  const sortedLoans = [...loanCats].sort((a,b) => {
+    if (debtStrategy === "avalanche") {
+      const ra = Number((state.categoryConfig[a]||{}).interestRate)||0, rb = Number((state.categoryConfig[b]||{}).interestRate)||0;
+      return rb - ra;
+    }
+    return loanRemaining(a) - loanRemaining(b);
+  });
+
+  const essentialCats = state.categories.filter(c => catType(c) === "expense" && isEssential(c));
+  const avgEssential = essentialCats.reduce((s,c) => s + (Number(state.budgets[c])||0), 0);
+  const targetFund = avgEssential * 3;
+  const fundPct = targetFund > 0 ? Math.min(100, (state.savingsBalance / targetFund) * 100) : 0;
+
   return `<div class="topbar"><div class="eyebrow">Finansų taisyklės</div></div>
   <div class="tabpanel fade-in">
 
@@ -2102,6 +2140,35 @@ function renderRules() {
           ${income > 0 ? `<div style="font-size:12px;">Norai dabar: €${fmt(currentWants)} (tikslas €${fmt(income*0.3)}) · Taupymas dabar: €${fmt(currentSavings)} (tikslas €${fmt(income*0.2)})</div>` : `<div style="font-size:12px;color:var(--rust);">Nustatyk Pajamų bazę Nustatymuose, kad veiktų.</div>`}
         </div>
       </div>
+    </div>
+
+    <div class="section-label" style="margin-top:22px;">Skolų ir avarinio fondo įrankiai</div>
+    ${settingsSectionHeader('debtstrategy', 'Skolų mokėjimo strategija', loanCats.length ? `${loanCats.length} aktyvi(ų) paskola(ų)` : 'Neturi aktyvių paskolų')}
+    <div class="settings-collapse ${state.settingsExpanded['debtstrategy']?'expanded':''}">
+      ${loanCats.length === 0 ? `<div style="font-size:13px;color:var(--faint);">Kai sukursi paskolos tipo kategoriją, čia atsiras mokėjimo eiliškumo pasiūlymas.</div>` : `
+        <div class="toggle-row" style="margin-bottom:10px;">
+          <button type="button" class="toggle-btn ${debtStrategy!=='avalanche'?'active blue':''}" onclick="state.debtStrategy='snowball';persistAll();render();">Sniego gniūžtė</button>
+          <button type="button" class="toggle-btn ${debtStrategy==='avalanche'?'active blue':''}" onclick="state.debtStrategy='avalanche';persistAll();render();">Lavina</button>
+        </div>
+        <div style="font-size:11px;color:var(--faint);margin-bottom:10px;">${debtStrategy==='avalanche' ? "Pirmiausia moki daugiau ten, kur didžiausios palūkanos — mažiausiai permoki ilgainiui." : "Pirmiausia užsidarai mažiausią skolą — greitas psichologinis laimėjimas, motyvuoja tęsti."}</div>
+        ${sortedLoans.map((c,i) => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid rgba(237,234,224,0.08);">
+          <span>${i+1}. ${catEmoji(c)}${c}${debtStrategy==='avalanche'?` (${Number((state.categoryConfig[c]||{}).interestRate)||0}%)`:''}</span>
+          <span class="tape">€${fmt(loanRemaining(c))}</span>
+        </div>`).join("")}
+        <label class="field" style="margin-top:10px;">Papildoma suma, kurią gali skirti skoloms šį mėnesį (€)
+          <input id="extra_debt_amount" type="text" inputmode="decimal" placeholder="pvz. 50" />
+        </label>
+        <button type="button" class="submit-btn" style="margin-top:8px;padding:9px 0;font-size:13px;background:var(--blue);" onclick="applyDebtStrategy()">Nukreipti į „${sortedLoans[0]}”</button>
+      `}
+    </div>
+
+    ${settingsSectionHeader('emergencyfund', 'Avarinis fondas', avgEssential > 0 ? `${Math.round(fundPct)}% pasiekta` : 'Reikia būtinų išlaidų biudžeto')}
+    <div class="settings-collapse ${state.settingsExpanded['emergencyfund']?'expanded':''}">
+      ${avgEssential > 0 ? `
+        <div style="font-size:12px;color:var(--faint);margin-bottom:10px;">Rekomenduojama turėti bent 3 mėn. būtinų išlaidų atsargą nenumatytiems atvejams.</div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;"><span>€${fmt(state.savingsBalance)} iš €${fmt(targetFund)}</span><span class="tape">${Math.round(fundPct)}%</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:${fundPct}%;background:var(--green);"></div></div>
+      ` : `<div style="font-size:13px;color:var(--faint);">Pažymėk bent vieną kategoriją kaip „būtina" ir nustatyk jos biudžetą, kad galėtume paskaičiuoti tikslą.</div>`}
     </div>
 
     <div class="section-label" style="margin-top:22px;">Didelio pirkinio taisyklės (informacija)</div>
@@ -2119,13 +2186,23 @@ function renderRules() {
       "<b>36% (back-end)</b> — visos skolos kartu: būstas + automobilio paskola + vartojimo kreditai + kortelių įmokos.<br><br>" +
       "Jei viršiji šias ribas, bankas gali atsisakyti suteikti paskolą arba pasiūlyti blogesnes sąlygas (aukštesnę palūkaną). Net jei bankas patvirtintų didesnę sumą, pačiam verta likti šiose ribose, kad liktų vietos nenumatytiems atvejams."
     )}
-    ${ruleInfoCard("debt", "💳 Bendra skolų riba",
-      "Visos mėnesio skolų įmokos kartu — geriausia neviršyti <b>30%</b> pajamų bet kokiam kitam pirkiniui ar paskolai (vartojimo kreditas, lizingas ir pan.).",
-      "Tai bendresnė, atsargesnė gairė nei būsto 36%, taikoma vartojimo kreditams, lizingams ar bet kokiai kitai skolai, kuri nėra būstas ar automobilis.<br><br>" +
-      "Kuo daugiau pajamų eina skolų aptarnavimui, tuo mažiau lieka <b>lankstumo</b> — pvz. jei netektum darbo ar atsirastų nenumatyta išlaida, aukšta skolų našta paverčia bet kokį sukrėtimą krize. 30% riba palieka realią atsargą."
+    ${ruleInfoCard("rent", "🏢 Nuomos įperkamumas — „30% taisyklė”",
+      "Nuoma (be komunalinių) neturėtų viršyti <b>30%</b> tavo pajamų „į rankas”.",
+      "Tai klasikinė, plačiai naudojama gairė nuomininkams — panaši į būsto paskolos 28% ribą, bet taikoma tiems, kas nuomojasi, ne perka.<br><br>" +
+      "<b>Kodėl 30%?</b> Viršijus šią ribą, statistiškai žmonės dažniau patiria finansinį stresą ir turi mažiau galimybių taupyti ar investuoti.<br>" +
+      "<b>Ką įskaičiuoti:</b> jei komunaliniai mokesčiai dideli arba nestabilūs, verta žiūrėti į <b>nuomą + komunalinius kartu</b>, ne tik pačią nuomą, kad vaizdas būtų tikslesnis.<br><br>" +
+      "Didelio pragyvenimo brangumo miestuose (pvz. Vilniuje) ši riba dažnai viršijama realybėje — tai nereiškia, kad būtinai blogai, bet verta sąmoningai žinoti, kiek viršiji, ir kompensuoti kitur (mažiau lanksčių išlaidų)."
+    )}
+    ${ruleInfoCard("retirement", "🌅 Ilgalaikis taupymas / pensija",
+      "Bendra gairė: apie <b>15%</b> pajamų skirti ilgalaikiam taupymui (pensijai, investicijoms), neskaitant avarinio fondo.",
+      "Lietuvoje valstybinė „Sodra” pensija dažniausiai padengia tik dalį buvusių pajamų — todėl asmeninis papildomas taupymas (III pakopos pensijų fondai, investicinės sąskaitos, akcijos) yra vis svarbesnis.<br><br>" +
+      "<b>Kodėl 15%?</b> Tai dažnai minima orientacinė riba, leidžianti per ~30-40 metų darbo stažą sukaupti reikšmingą papildomą sumą, dėl sudėtinių palūkanų efekto.<br><br>" +
+      "<b>Kaip pradėti:</b> gali naudoti šios programėlės „Investicinė” kategoriją mėnesio įnašo tikslui sekti, ir Finansų skirtuke — akcijų/kripto portfelį realiam turtui stebėti.<br><br>" +
+      "<b>Svarbu:</b> kuo anksčiau pradedi, tuo mažiau reikia įnešti kas mėnesį dėl ilgesnio augimo laiko — net nedidelė suma, pradėta anksti, ilgainiui gali aplenkti didesnę, pradėtą vėlai."
     )}
 
-    <div class="section-label" style="margin-top:22px;">Naujo pirkinio / paskolos skaičiuoklė</div>
+    ${settingsSectionHeader('purchasecalc', 'Naujo pirkinio / paskolos skaičiuoklė', 'Patikrink, ar saugu skolintis')}
+    <div class="settings-collapse ${state.settingsExpanded['purchasecalc']?'expanded':''}">
     <form class="stack" onsubmit="event.preventDefault(); runCalculator();">
       <label class="field">Tipas
         <select id="calc_type">
@@ -2155,6 +2232,7 @@ function renderRules() {
         <button type="button" class="submit-btn" style="margin-top:8px;padding:9px 0;font-size:13px;" onclick="createLoanFromCalculator()">Sukurti kaip paskolos kategoriją</button>
       </div>
     ` : ""}
+    </div>
 
     <div class="section-label" style="margin-top:22px;">Investicijų mokesčiai (informacija)</div>
     ${ruleInfoCard("stocktax", "📈 Akcijų/investicijų pardavimo mokesčiai",
@@ -2171,41 +2249,44 @@ function renderRules() {
     )}
 
     <!-- ===== INDIVIDUALIOS VEIKLOS MOKESČIŲ SKAIČIUOKLĖ — izoliuota sekcija, saugu pašalinti nepaliečiant kito kodo ===== -->
-    <div class="section-label" style="margin-top:22px;">Individualios veiklos mokesčių įvertinimas</div>
-    <div class="tip-card" style="border-left-color:var(--rust);">
-      <div style="color:var(--rust);font-weight:600;margin-bottom:4px;">⚠️ Tai įvertinimas planavimui, ne oficialus skaičiavimas</div>
-      <div style="font-size:12px;color:var(--faint);">Pagrįsta 2026 m. viešai skelbiamomis formulėmis dažniausiam atvejui (individuali veikla pagal pažymą, pinigų apskaita). Neapima PVM, ūkininkų, verslo liudijimo ar kitų specialių atvejų. Prieš mokant ar deklaruojant — <b>būtinai</b> patikrink su VMI arba buhalteriu, ypač jei pajamos artimos riboms.</div>
-    </div>
-    <form class="stack" onsubmit="event.preventDefault(); runTaxCalc();">
-      <label class="field">Individualios veiklos pajamos per metus (€)<input id="tax_income" type="text" inputmode="decimal" placeholder="pvz. 25000" value="${escapeHtml(String(state.taxCalc.income))}" /></label>
-      <label class="field">Sąnaudų metodas
-        <div class="toggle-row">
-          <button type="button" class="toggle-btn ${state.taxCalc.method!=='actual'?'active blue':''}" onclick="state.taxCalc.method='30pct';render();">30% norma</button>
-          <button type="button" class="toggle-btn ${state.taxCalc.method==='actual'?'active blue':''}" onclick="state.taxCalc.method='actual';render();">Faktinės išlaidos</button>
-        </div>
-      </label>
-      ${state.taxCalc.method === "actual" ? `<label class="field">Faktinės metinės sąnaudos (€)<input id="tax_expenses" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.actualExpenses))}" /></label>` : ""}
-      <label class="field">Kitos metinės pajamos (alga ir kt., nebūtina — reikia tikslesniam skaičiavimui virš 42 500 €)<input id="tax_other" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.otherIncome))}" /></label>
-      <label class="checkbox-field"><input type="checkbox" id="tax_insured" ${state.taxCalc.insuredElsewhere?'checked':''} onchange="state.taxCalc.insuredElsewhere=this.checked;" /> Jau apdraustas kitur (pvz. darbo santykiais) — PSD nuo veiklos nereikės</label>
-      <label class="checkbox-field"><input type="checkbox" id="tax_firstyear" ${state.taxCalc.firstYearRelief?'checked':''} onchange="state.taxCalc.firstYearRelief=this.checked;" /> Taikoma pirmų metų VSD lengvata</label>
-      <button type="submit" class="submit-btn" style="background:var(--rust);">Apskaičiuoti</button>
-    </form>
-    ${state.taxCalcResult ? (() => {
-      const t = state.taxCalcResult;
-      return `<div class="tip-card" style="border-left-color:var(--rust);margin-top:14px;">
-        <div style="font-weight:700;margin-bottom:8px;">Įvertinimas</div>
-        <div style="display:flex;flex-direction:column;gap:4px;font-size:13px;">
-          <div style="display:flex;justify-content:space-between;"><span>Pajamos</span><span class="tape">€${fmt(t.income)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>Atskaitomos sąnaudos</span><span class="tape">€${fmt(t.expenses)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>Apmokestinamosios pajamos (AP)</span><span class="tape">€${fmt(t.AP)}</span></div>
-          <div style="display:flex;justify-content:space-between;border-top:1px solid rgba(237,234,224,0.1);padding-top:4px;margin-top:2px;"><span>GPM</span><span class="tape" style="color:var(--rust)">€${fmt(t.gpm)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>VSD</span><span class="tape" style="color:var(--rust)">€${fmt(t.vsd)}</span></div>
-          <div style="display:flex;justify-content:space-between;"><span>PSD</span><span class="tape" style="color:var(--rust)">€${fmt(t.psd)}</span></div>
-          <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid rgba(237,234,224,0.1);padding-top:4px;margin-top:2px;"><span>Iš viso mokesčių</span><span class="tape" style="color:var(--rust)">€${fmt(t.total)}</span></div>
-          <div style="display:flex;justify-content:space-between;font-weight:700;"><span>Lieka į rankas</span><span class="tape" style="color:var(--green)">€${fmt(t.net)}</span></div>
-        </div>
-      </div>`;
-    })() : ""}
+    ${ruleInfoCard("ivtax", "🧾 Individualios veiklos mokesčiai",
+      "GPM (efektyviai ~5–20%) + VSD 12,52% + PSD 6,98% nuo apmokestinamųjų pajamų. Paspaudus — skaičiuoklė žemiau.",
+      "<b>GPM su mokesčio kreditu:</b> bazinis 15% tarifas, bet kreditas sumažina efektyvų mokestį iki ~5%, kai apmokestinamos pajamos (AP) ≤ 20 000 €, palaipsniui kylant iki pilno 15% ties 35–42 500 €. Virš 42 500 € jungiasi su visomis kitomis pajamomis pagal progresinius 20/25/32% tarifus.<br><br>" +
+      "<b>VSD:</b> 12,52% nuo 90% AP, bet ne mažiau nei nuo 13 836 €/metus (2026 m. minimali bazė). Galima pirmų metų lengvata.<br><br>" +
+      "<b>PSD:</b> 6,98% nuo tos pačios bazės, arba minimali 80,48 €/mėn., jei nesi apdraustas kitaip (pvz. darbo santykiais).<br><br>" +
+      "<b>Sąnaudos:</b> 30% norma (be dokumentų) arba faktinės išlaidos (su sąskaitomis) — renkiesi, kas naudingiau.<br><br>" +
+      "<span style='color:var(--rust);'>⚠️ Tai įvertinimas planavimui, ne oficialus skaičiavimas. Neapima PVM, ūkininkų, verslo liudijimo ar kitų specialių atvejų. Prieš mokant ar deklaruojant — būtinai patikrink su VMI arba buhalteriu.</span>",
+      `<form class="stack" onsubmit="event.preventDefault(); runTaxCalc();">
+        <label class="field">Individualios veiklos pajamos per metus (€)<input id="tax_income" type="text" inputmode="decimal" placeholder="pvz. 25000" value="${escapeHtml(String(state.taxCalc.income))}" /></label>
+        <label class="field">Sąnaudų metodas
+          <div class="toggle-row">
+            <button type="button" class="toggle-btn ${state.taxCalc.method!=='actual'?'active blue':''}" onclick="state.taxCalc.method='30pct';render();">30% norma</button>
+            <button type="button" class="toggle-btn ${state.taxCalc.method==='actual'?'active blue':''}" onclick="state.taxCalc.method='actual';render();">Faktinės išlaidos</button>
+          </div>
+        </label>
+        ${state.taxCalc.method === "actual" ? `<label class="field">Faktinės metinės sąnaudos (€)<input id="tax_expenses" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.actualExpenses))}" /></label>` : ""}
+        <label class="field">Kitos metinės pajamos (alga ir kt., nebūtina)<input id="tax_other" type="text" inputmode="decimal" value="${escapeHtml(String(state.taxCalc.otherIncome))}" /></label>
+        <label class="checkbox-field"><input type="checkbox" id="tax_insured" ${state.taxCalc.insuredElsewhere?'checked':''} onchange="state.taxCalc.insuredElsewhere=this.checked;" /> Jau apdraustas kitur — PSD nuo veiklos nereikės</label>
+        <label class="checkbox-field"><input type="checkbox" id="tax_firstyear" ${state.taxCalc.firstYearRelief?'checked':''} onchange="state.taxCalc.firstYearRelief=this.checked;" /> Taikoma pirmų metų VSD lengvata</label>
+        <button type="submit" class="submit-btn" style="background:var(--rust);">Apskaičiuoti</button>
+      </form>
+      ${state.taxCalcResult ? (() => {
+        const t = state.taxCalcResult;
+        return `<div class="tip-card" style="border-left-color:var(--rust);margin-top:14px;">
+          <div style="font-weight:700;margin-bottom:8px;">Įvertinimas</div>
+          <div style="display:flex;flex-direction:column;gap:4px;font-size:13px;">
+            <div style="display:flex;justify-content:space-between;"><span>Pajamos</span><span class="tape">€${fmt(t.income)}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Atskaitomos sąnaudos</span><span class="tape">€${fmt(t.expenses)}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>Apmokestinamosios pajamos (AP)</span><span class="tape">€${fmt(t.AP)}</span></div>
+            <div style="display:flex;justify-content:space-between;border-top:1px solid rgba(237,234,224,0.1);padding-top:4px;margin-top:2px;"><span>GPM</span><span class="tape" style="color:var(--rust)">€${fmt(t.gpm)}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>VSD</span><span class="tape" style="color:var(--rust)">€${fmt(t.vsd)}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span>PSD</span><span class="tape" style="color:var(--rust)">€${fmt(t.psd)}</span></div>
+            <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid rgba(237,234,224,0.1);padding-top:4px;margin-top:2px;"><span>Iš viso mokesčių</span><span class="tape" style="color:var(--rust)">€${fmt(t.total)}</span></div>
+            <div style="display:flex;justify-content:space-between;font-weight:700;"><span>Lieka į rankas</span><span class="tape" style="color:var(--green)">€${fmt(t.net)}</span></div>
+          </div>
+        </div>`;
+      })() : ""}`
+    )}
     <!-- ===== INDIVIDUALIOS VEIKLOS MOKESČIŲ SKAIČIUOKLĖ PABAIGA ===== -->
 
   </div>`;
@@ -2686,7 +2767,9 @@ function renderSettings() {
               ${(() => {
                 const proj = requiredMonthlyForGoal(c);
                 if (!proj) return "";
-                return `<div style="font-size:12px;">Reikia atidėti: <span class="tape" style="color:var(--gold);">€${fmt(proj.monthly)}/mėn.</span> (${proj.months} mėn. liko, trūksta €${fmt(proj.remaining)})</div>`;
+                return proj.monthly !== null
+                  ? `<div style="font-size:12px;">Reikia atidėti: <span class="tape" style="color:var(--gold);">€${fmt(proj.monthly)}/mėn.</span> (${proj.months} mėn. liko, trūksta €${fmt(proj.remaining)})</div>`
+                  : `<div style="font-size:12px;">Liko iki tikslo: <span class="tape" style="color:var(--gold);">€${fmt(proj.remaining)}</span></div>`;
               })()}
             </div>
           ` : ""}
@@ -2756,6 +2839,14 @@ function renderSettings() {
         </div>
         <input type="hidden" id="newcat_goaltype" value="amount" />
         <input id="newcat_goalval" type="text" inputmode="decimal" placeholder="pvz. 200 arba 15" />
+        <div style="font-size:11px;color:var(--faint);margin-top:4px;">Mėnesio įnašo tikslas.</div>
+      </div>
+      <div id="newcat_savingsgoal_extra" style="display:none;">
+        <div style="height:10px;"></div>
+        <label class="field">Bendra tikslo suma (nebūtina, pvz. kelionei reikalinga suma)<input id="newcat_targetamount" type="text" inputmode="decimal" placeholder="pvz. 1000" /></label>
+        <div style="height:10px;"></div>
+        <label class="field">Tikslo data (nebūtina)<input id="newcat_targetdate" type="date" /></label>
+        <div style="font-size:11px;color:var(--faint);margin-top:4px;">Jei nurodysi abu, paskaičiuosime, kiek reikia atidėti per mėnesį. Jei tik sumą — matysi, kiek liko iki tikslo.</div>
       </div>
       <div id="newcat_loan_wrap" style="display:none;">
         <label class="field">Bendra paskolos suma (€)<input id="newcat_loantotal" type="text" inputmode="decimal" placeholder="pvz. 5000" /></label>
@@ -2926,6 +3017,7 @@ function setNewCatType(t) {
   document.getElementById("newcat_loan").classList.toggle("active", t === "loan");
   document.getElementById("newcat_loan").classList.toggle("blue", t === "loan");
   document.getElementById("newcat_goal_wrap").style.display = (t === "investment" || t === "savingsgoal") ? "block" : "none";
+  document.getElementById("newcat_savingsgoal_extra").style.display = t === "savingsgoal" ? "block" : "none";
   document.getElementById("newcat_loan_wrap").style.display = t === "loan" ? "block" : "none";
   document.getElementById("newcat_essential_wrap").style.display = t === "expense" ? "flex" : "none";
   const helpTexts = {
@@ -3099,6 +3191,13 @@ function submitAddCategory(ev) {
   } else {
     addCategory(name, type, goalType, goalType === "percent" ? goalVal : 0, essential);
     if ((type === "investment" || type === "savingsgoal") && goalType === "amount") { state.budgets[name.trim()] = parseFloat(String(goalVal).replace(",",".")) || 0; persistAll(); }
+    if (type === "savingsgoal") {
+      const targetAmount = document.getElementById("newcat_targetamount") ? document.getElementById("newcat_targetamount").value : "";
+      const targetDate = document.getElementById("newcat_targetdate") ? document.getElementById("newcat_targetdate").value : "";
+      const trimmedName = name.trim();
+      if (targetAmount) updateCategoryTargetAmount(trimmedName, targetAmount);
+      if (targetDate) updateCategoryTargetDate(trimmedName, targetDate);
+    }
   }
   return false;
 }
