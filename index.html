@@ -450,6 +450,8 @@ let state = {
   categoryConfig: load("categoryConfig", DEFAULT_CONFIG),
   baseIncome: load("baseIncome", 0),
   gaugeStyle: load("gaugeStyle", "ring"),
+  fontSize: load("fontSize", "normal"),
+  categoryViewStyle: load("categoryViewStyle", "bars"),
   theme: load("theme", "dark"),
   lastExportAt: load("lastExportAt", null),
   recurringTemplates: load("recurringTemplates", []),
@@ -478,6 +480,8 @@ let state = {
   taxCalcResult: null,
   detectedSubscriptions: [],
   dataIntegrityWarning: null,
+  whatIfResult: null,
+  showWrapped: false,
   settingsExpanded: {},
   portfolioImportStep: null,
   portfolioImportRaw: null,
@@ -543,6 +547,8 @@ function persistAll() {
   save("categoryConfig", state.categoryConfig);
   save("baseIncome", state.baseIncome);
   save("gaugeStyle", state.gaugeStyle);
+  save("fontSize", state.fontSize);
+  save("categoryViewStyle", state.categoryViewStyle);
   save("theme", state.theme);
   save("lastExportAt", state.lastExportAt);
   save("recurringTemplates", state.recurringTemplates);
@@ -1431,8 +1437,17 @@ function renderOverview() {
       <span><span class="legend-dot" style="background:var(--gold)"></span>dėmesio</span>
       <span><span class="legend-dot" style="background:var(--rust)"></span>viršyta</span>
     </div>
-    <div class="section-label">Pagal kategoriją <span style="text-transform:none;letter-spacing:0;color:var(--faint);font-size:11px;">(bakstelėk filtruoti)</span></div>
-    ${rows}
+    <div class="section-label" style="display:flex;justify-content:space-between;align-items:center;">
+      <span>Pagal kategoriją <span style="text-transform:none;letter-spacing:0;color:var(--faint);font-size:11px;">(bakstelėk filtruoti)</span></span>
+      <span style="display:flex;gap:4px;">
+        <button type="button" onclick="setCategoryViewStyle('bars')" style="font-size:10px;padding:3px 8px;border-radius:5px;border:1px solid ${state.categoryViewStyle!=='pie'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.categoryViewStyle!=='pie'?'rgba(201,162,39,0.12)':'transparent'};color:${state.categoryViewStyle!=='pie'?'var(--gold)':'var(--faint)'};text-transform:none;letter-spacing:0;">Juostos</button>
+        <button type="button" onclick="setCategoryViewStyle('pie')" style="font-size:10px;padding:3px 8px;border-radius:5px;border:1px solid ${state.categoryViewStyle==='pie'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.categoryViewStyle==='pie'?'rgba(201,162,39,0.12)':'transparent'};color:${state.categoryViewStyle==='pie'?'var(--gold)':'var(--faint)'};text-transform:none;letter-spacing:0;">Pyragėlis</button>
+      </span>
+    </div>
+    ${state.categoryViewStyle === "pie" ? `
+      ${categoryPieSVG(d)}
+      ${state.categories.filter(c => catType(c) !== "expense").map(c => catRow(c, monthKey, d, "budget", true)).join("")}
+    ` : rows}
     <div class="section-label" style="margin-top:22px;">Šio mėnesio įrašai</div>
     ${filterChip}
     <input id="search_input" type="text" placeholder="Ieškoti (kategorija, pastaba)..." value="${state.searchQuery}" oninput="state.searchQuery=this.value;state._focusSearch=true;render();" style="margin-bottom:12px;" />
@@ -1508,6 +1523,34 @@ function fuelGaugeSVG(remaining, budget) {
   </svg>`;
 }
 
+function categoryPieSVG(d) {
+  const expenseCats = state.categories.filter(c => catType(c) === "expense" && (d.byCategory[c]||0) > 0);
+  const total = expenseCats.reduce((s,c) => s + (d.byCategory[c]||0), 0);
+  if (total <= 0) return `<div style="height:140px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;">Nėra išlaidų šį mėnesį.</div>`;
+  const colors = ["#C9A227","#6FA3BF","#D97742","#6FBF73","#B084CC","#E0607E","#5FBFB3","#D9B24C","#8892E0","#E08A5F"];
+  const size = 180, r = 80, cx = size/2, cy = size/2;
+  let angle = -90;
+  const sorted = [...expenseCats].sort((a,b) => (d.byCategory[b]||0)-(d.byCategory[a]||0));
+  const paths = sorted.map((c, i) => {
+    const value = d.byCategory[c]||0;
+    const fraction = value/total;
+    const sweep = fraction * 360;
+    const startAngle = angle;
+    const endAngle = angle + sweep;
+    angle = endAngle;
+    const largeArc = sweep > 180 ? 1 : 0;
+    const startRad = (startAngle * Math.PI)/180, endRad = (endAngle*Math.PI)/180;
+    const x1 = cx + r*Math.cos(startRad), y1 = cy + r*Math.sin(startRad);
+    const x2 = cx + r*Math.cos(endRad), y2 = cy + r*Math.sin(endRad);
+    const color = colors[i % colors.length];
+    return sorted.length === 1
+      ? `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}" />`
+      : `<path d="M${cx},${cy} L${x1.toFixed(2)},${y1.toFixed(2)} A${r},${r} 0 ${largeArc} 1 ${x2.toFixed(2)},${y2.toFixed(2)} Z" fill="${color}" />`;
+  }).join("");
+  const legend = sorted.map((c,i) => `<div style="display:flex;align-items:center;gap:6px;font-size:12px;padding:4px 0;"><span style="width:10px;height:10px;border-radius:50%;background:${colors[i%colors.length]};display:inline-block;flex-shrink:0;"></span><span>${catEmoji(c)}${escapeHtml(c)}</span><span class="tape" style="margin-left:auto;color:var(--faint);">€${fmt(d.byCategory[c])} (${Math.round((d.byCategory[c]/total)*100)}%)</span></div>`).join("");
+  return `<svg viewBox="0 0 ${size} ${size}" style="width:100%;max-width:200px;height:auto;display:block;margin:0 auto;">${paths}</svg>
+    <div style="margin-top:10px;">${legend}</div>`;
+}
 function ringGaugeSVG(spent, budget) {
   if (budget <= 0 && spent <= 0) {
     return `<div style="height:160px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;background:var(--surface);border-radius:12px;">Kai nustatysi biudžetą ir pridėsi išlaidų, čia atsiras indikatorius.</div>`;
@@ -2116,6 +2159,42 @@ function cancelPortfolioImport() {
   render();
 }
 
+function computeFinancialHealthScore() {
+  const monthKey = currentMonthKey();
+  const d = monthData(monthKey, "budget");
+  let budgetScore = 25;
+  if (d.budgetTotal > 0) {
+    const ratio = d.spentTotal / d.budgetTotal;
+    budgetScore = ratio <= 1 ? 25 : Math.max(0, 25 - (ratio-1)*50);
+  }
+  let savingsScore = 0;
+  if (d.incomeTotal > 0) {
+    const rate = (d.investedTotal + d.savingsGoalTotal) / d.incomeTotal;
+    savingsScore = Math.min(25, (rate/0.20)*25);
+  }
+  const essentialCats = state.categories.filter(c => catType(c)==="expense" && isEssential(c));
+  const avgEssential = essentialCats.reduce((s,c)=>s+(Number(state.budgets[c])||0),0);
+  let fundScore = 12.5;
+  if (avgEssential > 0) {
+    const targetFund = avgEssential*3;
+    fundScore = Math.min(25, Math.max(0, (state.savingsBalance/targetFund)*25));
+  }
+  let debtScore = 25;
+  if (d.incomeTotal > 0) {
+    const loanCats = state.categories.filter(c=>catType(c)==="loan");
+    const totalMinPay = loanCats.reduce((s,c)=>s+(Number((state.categoryConfig[c]||{}).minPayment)||0),0);
+    const debtRatio = totalMinPay/d.incomeTotal;
+    debtScore = debtRatio<=0 ? 25 : Math.max(0, 25 - (debtRatio/0.20)*25);
+  }
+  const total = Math.round(budgetScore+savingsScore+fundScore+debtScore);
+  return { total: Math.max(0,Math.min(100,total)), budgetScore: Math.round(budgetScore), savingsScore: Math.round(savingsScore), fundScore: Math.round(fundScore), debtScore: Math.round(debtScore) };
+}
+function healthScoreLabel(score) {
+  if (score >= 80) return { text: "Puiku", color: "var(--green)" };
+  if (score >= 60) return { text: "Gerai", color: "var(--gold)" };
+  if (score >= 40) return { text: "Vidutiniškai", color: "var(--gold)" };
+  return { text: "Reikia dėmesio", color: "var(--rust)" };
+}
 function computeCurrentNetWorth() {
   const savings = state.savingsBalance;
   const invested = allTimeInvestedTotal();
@@ -2233,6 +2312,26 @@ function runTaxCalc() {
 }
 // ===== Individualios veiklos mokesčių skaičiuoklės logikos pabaiga =====
 
+function calcWhatIf(category, pctCut) {
+  let monthsChecked = 0, total = 0;
+  let key = currentMonthKey();
+  for (let i = 0; i < 6 && monthsChecked < 3; i++) {
+    const mk = shiftedMonthKey(key, -i);
+    if (monthHasData(mk, "budget")) {
+      const d = monthData(mk, "budget");
+      if ((d.byCategory[category]||0) > 0) { total += d.byCategory[category]; monthsChecked++; }
+    }
+  }
+  const avgMonthly = monthsChecked > 0 ? total / monthsChecked : 0;
+  const monthlySavings = avgMonthly * (pctCut / 100);
+  return { avgMonthly, monthlySavings, annualSavings: monthlySavings * 12, monthsChecked };
+}
+function runWhatIf() {
+  const category = document.getElementById("whatif_category").value;
+  const pct = parseFloat(document.getElementById("whatif_pct").value.replace(",", ".")) || 0;
+  state.whatIfResult = { category, ...calcWhatIf(category, pct) };
+  render();
+}
 function renderRules() {
   const income = state.baseIncome;
   const flexCats = state.categories.filter(c => catType(c) === "expense" && !isEssential(c));
@@ -2273,6 +2372,26 @@ function renderRules() {
           ${income > 0 ? `<div style="font-size:12px;">Norai dabar: €${fmt(currentWants)} (tikslas €${fmt(income*0.3)}) · Taupymas dabar: €${fmt(currentSavings)} (tikslas €${fmt(income*0.2)})</div>` : `<div style="font-size:12px;color:var(--rust);">Nustatyk Pajamų bazę Nustatymuose, kad veiktų.</div>`}
         </div>
       </div>
+    </div>
+
+    <div class="section-label" style="margin-top:22px;">„Kas jei" taupymo simuliatorius</div>
+    <div class="tip-card" style="border-left-color:var(--gold);">
+      <div style="font-size:12px;color:var(--faint);margin-bottom:10px;">Pasirink kategoriją ir procentą, kiek norėtum sumažinti — paskaičiuosime, kiek sutaupytum per mėnesį ir metus, pagal tavo tikrą vidutinę išlaidą (paskutinių turimų mėnesių vidurkis, iki 3 mėn.).</div>
+      <form class="stack" onsubmit="event.preventDefault(); runWhatIf();">
+        <label class="field">Kategorija
+          <select id="whatif_category">${state.categories.filter(c=>catType(c)==="expense").map(c=>`<option value="${c}">${catEmoji(c)}${c}</option>`).join("")}</select>
+        </label>
+        <label class="field">Sumažinti (%)<input id="whatif_pct" type="text" inputmode="decimal" placeholder="pvz. 20" /></label>
+        <button type="submit" class="submit-btn" style="background:var(--gold);color:var(--ink);">Apskaičiuoti</button>
+      </form>
+      ${state.whatIfResult ? (() => {
+        const w = state.whatIfResult;
+        if (w.monthsChecked === 0) return `<div style="font-size:12px;color:var(--rust);margin-top:10px;">Šiai kategorijai dar nėra pakankamai duomenų.</div>`;
+        return `<div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(237,234,224,0.08);font-size:13px;">
+          <div>Vidutiniškai leidi: <span class="tape">€${fmt(w.avgMonthly)}/mėn.</span> (pagal ${w.monthsChecked} mėn.)</div>
+          <div style="margin-top:4px;">Sutaupytum: <span class="tape" style="color:var(--green)">€${fmt(w.monthlySavings)}/mėn.</span> · <span class="tape" style="color:var(--green)">€${fmt(w.annualSavings)}/metus</span></div>
+        </div>`;
+      })() : ""}
     </div>
 
     <div class="section-label" style="margin-top:22px;">Skolų ir avarinio fondo įrankiai</div>
@@ -2477,11 +2596,79 @@ function trendChartSVG(year) {
     </div>`;
 }
 
+function computeWrappedStats(year) {
+  const y = yearData(year);
+  const catTotals = {};
+  let entriesCount = 0, overBudgetMonths = 0;
+  y.monthly.forEach(m => {
+    const d = monthData(m.key, "calendar");
+    entriesCount += d.expenses.length + d.incomes.length;
+    if (d.budgetTotal > 0 && d.spentTotal > d.budgetTotal) overBudgetMonths++;
+    state.categories.filter(c => catType(c) === "expense").forEach(c => {
+      catTotals[c] = (catTotals[c] || 0) + (d.byCategory[c] || 0);
+    });
+  });
+  const catEntries = Object.entries(catTotals).sort((a,b) => b[1]-a[1]);
+  const biggestCategory = catEntries.length ? { name: catEntries[0][0], amount: catEntries[0][1] } : null;
+  const monthsWithSpend = y.monthly.filter(m => m.spentTotal > 0);
+  const bestMonth = monthsWithSpend.length ? [...monthsWithSpend].sort((a,b) => a.spentTotal-b.spentTotal)[0] : null;
+  const worstMonth = monthsWithSpend.length ? [...monthsWithSpend].sort((a,b) => b.spentTotal-a.spentTotal)[0] : null;
+  return { ...y, entriesCount, overBudgetMonths, biggestCategory, bestMonth, worstMonth };
+}
+function renderWrapped() {
+  const year = state.reportYear;
+  const w = computeWrappedStats(year);
+  const card = (emoji, label, value, sub, color) => `
+    <div style="background:linear-gradient(135deg, rgba(201,162,39,0.12), rgba(111,163,191,0.08));border:1px solid rgba(237,234,224,0.1);border-radius:16px;padding:22px;margin-bottom:14px;text-align:center;">
+      <div style="font-size:28px;margin-bottom:8px;">${emoji}</div>
+      <div style="font-size:12px;color:var(--faint);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">${label}</div>
+      <div class="tape" style="font-size:26px;font-weight:700;color:${color||'var(--gold)'};">${value}</div>
+      ${sub ? `<div style="font-size:12px;color:var(--faint);margin-top:6px;">${sub}</div>` : ""}
+    </div>`;
+  return `<div class="topbar" style="display:flex;align-items:center;justify-content:space-between;">
+    <div class="eyebrow">${year} metų apžvalga</div>
+    <button class="icon-btn" onclick="state.showWrapped=false;render();" aria-label="Uždaryti">${ICONS.x}</button>
+  </div>
+  <div class="tabpanel fade-in">
+    ${w.monthly.length === 0 ? `<div class="empty" style="text-align:center;padding:40px 0;">Šiems metams duomenų nėra.</div>` : `
+      ${card("💰", "Iš viso uždirbai", `€${fmt(w.incomeTotal)}`, null, "var(--green)")}
+      ${card("🛒", "Iš viso išleidai", `€${fmt(w.spentTotal)}`, null)}
+      ${card(w.saved>=0?"🎉":"⚠️", w.saved>=0?"Sutaupei":"Trūkumas", `€${fmt(Math.abs(w.saved))}`, null, w.saved>=0?"var(--green)":"var(--rust)")}
+      ${card("📈", "Investavai", `€${fmt(w.investedTotal)}`, null, "var(--blue)")}
+      ${w.biggestCategory ? card("🏆", "Didžiausia kategorija", escapeHtml(w.biggestCategory.name), `€${fmt(w.biggestCategory.amount)} per metus`) : ""}
+      ${w.bestMonth ? card("😌", "Taupiausias mėnuo", monthLabel(w.bestMonth.key), `€${fmt(w.bestMonth.spentTotal)} išleista`, "var(--green)") : ""}
+      ${w.worstMonth ? card("🔥", "Brangiausias mėnuo", monthLabel(w.worstMonth.key), `€${fmt(w.worstMonth.spentTotal)} išleista`, "var(--rust)") : ""}
+      ${card("📝", "Iš viso įrašų", `${w.entriesCount}`, "kiek kartų suvedei išlaidą ar pajamą")}
+      ${card(w.overBudgetMonths===0?"✅":"📊", "Mėnesių viršyta biudžetą", `${w.overBudgetMonths} iš ${w.monthly.length}`, null, w.overBudgetMonths===0?"var(--green)":"var(--gold)")}
+    `}
+  </div>`;
+}
 function renderYearlyReport() {
   const year = state.reportYear;
   const y = yearData(year);
   const canGoForward = year < new Date().getFullYear();
   const nw = computeCurrentNetWorth();
+  const health = computeFinancialHealthScore();
+  const healthInfo = healthScoreLabel(health.total);
+  const healthSection = `
+    <div class="section-label">Finansinės sveikatos balas</div>
+    <div class="tip-card" style="border-left-color:${healthInfo.color};">
+      <div style="display:flex;align-items:center;gap:14px;">
+        <div class="tape" style="font-size:32px;font-weight:700;color:${healthInfo.color};">${health.total}</div>
+        <div>
+          <div style="font-weight:600;color:${healthInfo.color};">${healthInfo.text}</div>
+          <div style="font-size:11px;color:var(--faint);">iš 100 galimų</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;font-size:12px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(237,234,224,0.08);">
+        <div style="display:flex;justify-content:space-between;"><span>Biudžeto laikymasis</span><span class="tape">${health.budgetScore}/25</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Taupymo tempas</span><span class="tape">${health.savingsScore}/25</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Avarinis fondas</span><span class="tape">${health.fundScore}/25</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Skolų našta</span><span class="tape">${health.debtScore}/25</span></div>
+      </div>
+      <div style="font-size:11px;color:var(--faint);margin-top:8px;">Balas tikslesnis, kai naudoji programėlę bent kelis mėnesius ir esi nustatęs pajamų bazę bei būtinų kategorijų biudžetus.</div>
+    </div>
+  `;
   const netWorthSection = `
     <div class="section-label">Grynasis turtas (dabar)</div>
     <div class="stat-grid">
@@ -2496,12 +2683,14 @@ function renderYearlyReport() {
     <div style="margin-bottom:20px;">${netWorthTrendSVG()}</div>
   `;
   return `
+    ${healthSection}
     ${netWorthSection}
     <div class="report-month-nav">
       <button class="nav-btn" onclick="state.reportYear--;render();" aria-label="Ankstesni metai">${ICONS.chevronLeft}</button>
       <div class="display" style="font-size:17px;font-weight:600;">${year}</div>
       <button class="nav-btn" style="${canGoForward?'':'opacity:.3;'}" ${canGoForward?'':'disabled'} onclick="state.reportYear++;render();" aria-label="Kiti metai">${ICONS.chevronRight}</button>
     </div>
+    ${y.monthly.length > 0 ? `<button type="button" class="submit-btn" style="background:linear-gradient(135deg,var(--gold),var(--blue));color:var(--ink);margin-bottom:16px;" onclick="state.showWrapped=true;render();">🎁 ${year} metų apžvalga</button>` : ""}
     ${y.monthly.length === 0 ? `<div class="empty" style="text-align:center;padding:40px 0;">Šiems metams duomenų nėra.</div>` : `
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-label">Metinės pajamos</div><div class="tape stat-value" style="color:var(--green)">€${fmt(y.incomeTotal)}</div></div>
@@ -3017,6 +3206,14 @@ function renderSettings() {
 
     <div class="section-label" style="margin-top:28px;">Išvaizda ir sauga</div>
     <div class="field-row">
+      <span class="field-row-label">Šrifto dydis</span>
+      <div style="display:flex;gap:6px;">
+        <button type="button" onclick="setFontSize('small')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.fontSize==='small'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.fontSize==='small'?'rgba(201,162,39,0.12)':'transparent'};color:${state.fontSize==='small'?'var(--gold)':'var(--faint)'};">Mažas</button>
+        <button type="button" onclick="setFontSize('normal')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.fontSize==='normal'||!state.fontSize?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.fontSize==='normal'||!state.fontSize?'rgba(201,162,39,0.12)':'transparent'};color:${state.fontSize==='normal'||!state.fontSize?'var(--gold)':'var(--faint)'};">Įprastas</button>
+        <button type="button" onclick="setFontSize('large')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.fontSize==='large'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.fontSize==='large'?'rgba(201,162,39,0.12)':'transparent'};color:${state.fontSize==='large'?'var(--gold)':'var(--faint)'};">Didelis</button>
+      </div>
+    </div>
+    <div class="field-row">
       <span class="field-row-label">Apžvalgos indikatorius</span>
       <div style="display:flex;gap:6px;">
         <button type="button" onclick="setGaugeStyle('ring')" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid ${state.gaugeStyle!=='fuel'?'var(--gold)':'rgba(237,234,224,0.15)'};background:${state.gaugeStyle!=='fuel'?'rgba(201,162,39,0.12)':'transparent'};color:${state.gaugeStyle!=='fuel'?'var(--gold)':'var(--faint)'};">Žiedas</button>
@@ -3091,6 +3288,8 @@ function updateBudgetStartDay(val) {
   persistAll(); render();
 }
 function setGaugeStyle(style) { state.gaugeStyle = style; persistAll(); render(); }
+function setFontSize(size) { state.fontSize = size; persistAll(); render(); }
+function setCategoryViewStyle(style) { state.categoryViewStyle = style; persistAll(); render(); }
 function daysSinceExport() {
   if (!state.lastExportAt) return null;
   return Math.floor((Date.now() - new Date(state.lastExportAt).getTime()) / 86400000);
@@ -3474,6 +3673,7 @@ function submitPin(ev) {
 
 function render() {
   const app = document.getElementById("app");
+  app.style.zoom = state.fontSize === "large" ? "1.15" : state.fontSize === "small" ? "0.9" : "1";
   if (state.appPin && state.appLocked) {
     app.innerHTML = renderLockScreen();
     const pi = document.getElementById("pin_input");
@@ -3481,6 +3681,7 @@ function render() {
     return;
   }
   if (state.showHelp) { app.innerHTML = renderHelp(); return; }
+  if (state.showWrapped) { app.innerHTML = renderWrapped(); return; }
   if (state.importStep === "mapping") { app.innerHTML = renderImportMapping(); return; }
   if (state.importStep === "review") { app.innerHTML = renderImportReview(); return; }
   if (state.portfolioImportStep === "mapping") { app.innerHTML = renderPortfolioImportMapping(); return; }
@@ -3518,7 +3719,7 @@ function setTab(t) {
   render();
 }
 
-const PERSISTED_KEYS = ["expenses","incomes","budgets","categories","categoryConfig","baseIncome","gaugeStyle","theme","lastExportAt","recurringTemplates","budgetStartDay","savingsBalance","savingsGoalMin","savingsLog","merchantMap","importedHashes","appPin","debtStrategy","appliedRules","ruleSnapshots","netWorthHistory","recurringIncomes","csvMappingMemory","holdings","finnhubApiKey","cryptoHoldings"];
+const PERSISTED_KEYS = ["expenses","incomes","budgets","categories","categoryConfig","baseIncome","gaugeStyle","theme","lastExportAt","recurringTemplates","budgetStartDay","savingsBalance","savingsGoalMin","savingsLog","merchantMap","importedHashes","appPin","debtStrategy","appliedRules","ruleSnapshots","netWorthHistory","recurringIncomes","csvMappingMemory","holdings","finnhubApiKey","cryptoHoldings","fontSize","categoryViewStyle"];
 
 const KEY_SCHEMA = {
   expenses: "array", incomes: "array", budgets: "object", categories: "array", categoryConfig: "object",
@@ -3528,6 +3729,8 @@ const KEY_SCHEMA = {
   debtStrategy: "string", appliedRules: "object", ruleSnapshots: "object", netWorthHistory: "array",
   recurringIncomes: "array", csvMappingMemory: "object", holdings: "array", finnhubApiKey: "string",
   cryptoHoldings: "array",
+  fontSize: "string",
+  categoryViewStyle: "string",
 };
 function typeMatches(val, expected) {
   if (val === null || val === undefined) return true;
