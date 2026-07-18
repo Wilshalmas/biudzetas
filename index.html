@@ -774,7 +774,7 @@ function updateCategoryTargetAmount(name, val) {
 function requiredMonthlyForGoal(c) {
   const cfg = state.categoryConfig[c] || {};
   if (!cfg.targetAmount) return null;
-  const already = allTimePaidForCategory(c);
+  const already = netSavingsGoalAmount(c);
   const remaining = Math.max(0, cfg.targetAmount - already);
   if (!cfg.targetDate) return { monthly: null, months: null, remaining, targetAmount: cfg.targetAmount };
   const target = new Date(cfg.targetDate + "T00:00:00");
@@ -966,6 +966,7 @@ function confirmImport() {
       state.incomes.unshift({ id: uid(), amount: d.amount, label: d.rawDesc.slice(0,40) || "Pajamos", date: d.date });
     } else {
       state.expenses.unshift({ id: uid(), amount: d.amount, category: d.category, date: d.date, note: d.rawDesc.slice(0,60), necessity: d.necessity });
+      if (catType(d.category) === "savingsgoal") state.savingsBalance += Number(d.amount);
       const norm = normalizeMerchant(d.rawDesc);
       if (norm) state.merchantMap[norm] = d.category;
     }
@@ -1055,6 +1056,7 @@ function applyRecurringTemplates() {
     const exists = state.expenses.some(e => e.recurringId === t.id && budgetMonthKeyForDate(e.date) === monthKey);
     if (!exists) {
       state.expenses.unshift({ id: uid(), amount: t.amount, category: t.category, date: startDateStr, note: t.note, necessity: t.necessity, recurringId: t.id });
+      if (catType(t.category) === "savingsgoal") { state.savingsBalance += Number(t.amount); save("savingsBalance", state.savingsBalance); }
       changed = true;
     }
   });
@@ -1102,6 +1104,7 @@ function removeExpense(id) {
   if (idx === -1) return;
   const item = state.expenses[idx];
   if (item.fromSavings) state.savingsBalance += Number(item.amount);
+  if (catType(item.category) === "savingsgoal") state.savingsBalance -= Number(item.amount);
   state.expenses.splice(idx, 1);
   lastDeleted = { type: "expense", data: item, idx };
   persistAll(); render();
@@ -1120,6 +1123,7 @@ function undoDelete() {
   if (!lastDeleted) return;
   if (lastDeleted.type === "expense") {
     if (lastDeleted.data.fromSavings) state.savingsBalance -= Number(lastDeleted.data.amount);
+    if (catType(lastDeleted.data.category) === "savingsgoal") state.savingsBalance += Number(lastDeleted.data.amount);
     state.expenses.splice(lastDeleted.idx, 0, lastDeleted.data);
   } else {
     state.incomes.splice(lastDeleted.idx, 0, lastDeleted.data);
@@ -1253,6 +1257,12 @@ function buildTips(monthKey, mode) {
 
 function allTimePaidForCategory(c) {
   return state.expenses.filter(e => e.category === c).reduce((s,e) => s + Number(e.amount), 0);
+}
+function savingsGoalWithdrawn(c) {
+  return state.expenses.filter(e => e.fromSavings && e.savingsSource === c).reduce((s,e) => s + Number(e.amount), 0);
+}
+function netSavingsGoalAmount(c) {
+  return Math.max(0, allTimePaidForCategory(c) - savingsGoalWithdrawn(c));
 }
 function loanTotalFor(c) { return (state.categoryConfig[c] && Number(state.categoryConfig[c].loanTotal)) || 0; }
 function loanRemaining(c) { return Math.max(0, loanTotalFor(c) - allTimePaidForCategory(c)); }
@@ -1633,6 +1643,15 @@ function renderAdd() {
       <label class="checkbox-field"><input type="checkbox" id="f_fromsavings" onchange="document.getElementById('f_event_wrap').style.display=this.checked?'block':'none';" ${exp&&exp.fromSavings?'checked':''} /> Apmokėta iš santaupų (neįtraukti į mėnesio biudžetą)</label>
       <div id="f_event_wrap" style="display:${exp&&exp.fromSavings?'block':'none'};">
         <label class="field">Kelionės/įvykio pavadinimas (nebūtina)<input id="f_event" type="text" placeholder="pvz. Kelionė į Ispaniją" value="${exp?escapeHtml(exp.event||''):''}" /></label>
+        ${state.categories.some(c => catType(c) === "savingsgoal") ? `
+        <label class="field">Iš kurio taupymo tikslo (nebūtina)
+          <select id="f_savingssource">
+            <option value="">— Bendrai, nepriskirta —</option>
+            ${state.categories.filter(c => catType(c) === "savingsgoal").map(c => `<option value="${c}" ${exp&&exp.savingsSource===c?'selected':''}>${catEmoji(c)}${c}</option>`).join("")}
+          </select>
+        </label>
+        <div style="font-size:11px;color:var(--faint);margin-top:4px;">Jei pasirinksi tikslą, jo progresas sumažės tiek, kiek čia išleidi — kad nerodytų jau panaudotos sumos kaip vis dar sutaupytos.</div>
+        ` : ""}
       </div>
       <div style="display:flex;gap:8px;">
         <button type="submit" class="submit-btn" style="flex:1;width:auto;">${exp?ICONS.check:ICONS.plus} ${exp?"Išsaugoti":"Įrašyti išlaidą"}</button>
@@ -1755,11 +1774,13 @@ function submitAdd(ev) {
   if (!date) { state.formError = "Pasirink datą."; render(); return false; }
   const fromSavings = document.getElementById("f_fromsavings").checked;
   const event = fromSavings ? document.getElementById("f_event").value.trim() : "";
+  const savingsSourceEl = document.getElementById("f_savingssource");
+  const savingsSource = fromSavings && savingsSourceEl ? savingsSourceEl.value : "";
   const fields = {
     amount, category: document.getElementById("f_category").value,
     date, note: document.getElementById("f_note").value.trim(),
     necessity: document.getElementById("f_necessity").value,
-    fromSavings, event,
+    fromSavings, event, savingsSource,
   };
   if (state.editingExpenseId) {
     const idx = state.expenses.findIndex(e => e.id === state.editingExpenseId);
@@ -1767,12 +1788,15 @@ function submitAdd(ev) {
       const old = state.expenses[idx];
       if (old.fromSavings) state.savingsBalance += Number(old.amount);
       if (fromSavings) state.savingsBalance -= amount;
+      if (catType(old.category) === "savingsgoal") state.savingsBalance -= Number(old.amount);
+      if (catType(fields.category) === "savingsgoal") state.savingsBalance += amount;
       state.expenses[idx] = { ...old, ...fields };
     }
     state.editingExpenseId = null;
     showToast("Išlaida atnaujinta");
   } else {
     if (fromSavings) state.savingsBalance -= amount;
+    if (catType(fields.category) === "savingsgoal") state.savingsBalance += amount;
     state.expenses.unshift({ id: uid(), ...fields });
     showToast(fromSavings ? "Išlaida įrašyta iš santaupų" : "Išlaida įrašyta");
   }
@@ -1945,7 +1969,7 @@ function allTimeInvestedTotal() {
 }
 function allTimeSavingsGoalTotal() {
   return state.categories.filter(c => catType(c) === "savingsgoal")
-    .reduce((s,c) => s + allTimePaidForCategory(c), 0);
+    .reduce((s,c) => s + netSavingsGoalAmount(c), 0);
 }
 function allTimeLoanRemainingTotal() {
   return state.categories.filter(c => catType(c) === "loan")
@@ -3123,6 +3147,20 @@ function renderFinance() {
       if (keys.length === 0) return "";
       return `<div class="section-label" style="margin-top:16px;">Kelionių / įvykių išlaidos (iš santaupų)</div>
         ${keys.map(k => `<div class="ledger-row" style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;"><span>${escapeHtml(k)}</span><span class="tape">€${fmt(groups[k])}</span></div>`).join("")}`;
+    })()}
+
+    ${(() => {
+      const goalCats = state.categories.filter(c => catType(c) === "savingsgoal");
+      if (goalCats.length === 0) return "";
+      const perGoal = goalCats.map(c => ({ c, net: netSavingsGoalAmount(c) }));
+      const allocated = perGoal.reduce((s,g) => s + g.net, 0);
+      const unallocated = Math.max(0, state.savingsBalance - allocated);
+      return `<div class="section-label" style="margin-top:16px;">Kaip išskaidyta santaupų suma</div>
+        <div style="font-size:11px;color:var(--faint);margin-bottom:8px;">Jei visas santaupas laikai vienoje sąskaitoje, čia matai, kiek iš tos sumos „priklauso" kiekvienam tikslui.</div>
+        ${perGoal.map(g => `<div class="ledger-row" style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;"><span>${catEmoji(g.c)}${escapeHtml(g.c)}</span><span class="tape" style="color:var(--gold);">€${fmt(g.net)}</span></div>`).join("")}
+        <div class="ledger-row" style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;border-top:1px solid rgba(237,234,224,0.08);margin-top:4px;">
+          <span>Nepriskirta</span><span class="tape" style="color:var(--faint);">€${fmt(unallocated)}</span>
+        </div>`;
     })()}
     </div>
 
