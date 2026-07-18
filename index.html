@@ -17,17 +17,22 @@
   :root {
     --ink: #1B2420; --surface: #22302A; --surface-light: #2A3B33; --paper: #EDEAE0;
     --gold: #C9A227; --green: #6FBF73; --rust: #D97742; --faint: #8FA098; --blue: #6FA3BF;
+    --frame-bg: #0E1512;
   }
   :root.theme-light {
     --ink: #F4F1E8; --surface: #E9E4D6; --surface-light: #DED7C4; --paper: #262E28;
     --gold: #A8791C; --green: #3F8B52; --rust: #B85A2E; --faint: #6E7A70; --blue: #3E7691;
+    --frame-bg: #C9C2AE;
   }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; min-width: 0; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; min-width: 0; -webkit-touch-callout: none; }
   html { overflow-x: hidden; height: 100%; }
-  html, body { margin: 0; padding: 0; background: var(--ink); color: var(--paper); font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+  html, body { margin: 0; padding: 0; background: var(--frame-bg); color: var(--paper); font-family: 'IBM Plex Sans', system-ui, sans-serif; }
   body { padding-bottom: calc(78px + env(safe-area-inset-bottom)); padding-top: env(safe-area-inset-top);
-    overflow-x: hidden; overscroll-behavior-x: none; width: 100%; }
-  .app { max-width: 480px; margin: 0 auto; overflow-x: hidden; width: 100%; min-height: 100vh; min-height: 100dvh; }
+    overflow-x: hidden; overscroll-behavior: none; width: 100%; }
+  .app { max-width: 480px; margin: 0 auto; overflow-x: hidden; width: 100%; min-height: 100vh; min-height: 100dvh; background: var(--ink); position: relative; }
+  @media (min-width: 560px) {
+    .app { box-shadow: 0 0 0 1px rgba(237,234,224,0.08), 0 30px 80px rgba(0,0,0,0.5); min-height: 100vh; }
+  }
   .tape { font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.02em; }
   .display { font-family: 'Fraunces', Georgia, serif; }
   input, select, button { font-family: inherit; }
@@ -101,8 +106,8 @@
   .fade-in { animation: fadeIn .35s ease both; }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   .tip-card { background: var(--surface-light); border-left: 3px solid var(--gold); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; font-size: 13px; }
-  .settings-collapse { max-height: 0; overflow: hidden; opacity: 0; transition: max-height 0.35s ease, opacity 0.25s ease; }
-  .settings-collapse.expanded { max-height: 3000px; opacity: 1; }
+  .settings-collapse { max-height: 0; overflow: hidden; opacity: 0; padding: 0 2px; transition: max-height 0.35s ease, opacity 0.25s ease, margin-bottom 0.35s ease, padding 0.35s ease; }
+  .settings-collapse.expanded { max-height: 3000px; opacity: 1; margin-bottom: 16px; padding: 8px 2px 16px 2px; border-bottom: 1px solid rgba(237,234,224,0.06); }
   ::-webkit-scrollbar { display: none; }
   html { scrollbar-width: none; -ms-overflow-style: none; }
   .subtabs { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -2276,7 +2281,12 @@ function netWorthTrendSVG() {
 }
 
 function toggleSettingsSection(key) {
-  state.settingsExpanded[key] = !state.settingsExpanded[key];
+  const wasOpen = !!state.settingsExpanded[key];
+  const isHelp = key.indexOf("help_") === 0;
+  Object.keys(state.settingsExpanded).forEach(k => {
+    if ((k.indexOf("help_") === 0) === isHelp) delete state.settingsExpanded[k];
+  });
+  if (!wasOpen) state.settingsExpanded[key] = true;
   render();
 }
 function settingsSectionHeader(key, title, summary) {
@@ -2290,7 +2300,9 @@ function settingsSectionHeader(key, title, summary) {
   </div>`;
 }
 function toggleRuleInfo(id) {
-  state.expandedRuleInfo[id] = !state.expandedRuleInfo[id];
+  const wasOpen = !!state.expandedRuleInfo[id];
+  state.expandedRuleInfo = {};
+  if (!wasOpen) state.expandedRuleInfo[id] = true;
   render();
 }
 function ruleInfoCard(id, title, summary, details, extra) {
@@ -3879,9 +3891,14 @@ function submitPin(ev) {
   return false;
 }
 
+let lastRenderedTab = null;
 function render() {
   const app = document.getElementById("app");
   app.style.zoom = state.fontSize === "large" ? "1.15" : state.fontSize === "small" ? "0.9" : "1";
+  if (state.tab !== lastRenderedTab) {
+    lastRenderedTab = state.tab;
+    window.scrollTo(0, 0);
+  }
   if (state.appPin && state.appLocked) {
     app.innerHTML = renderLockScreen();
     const pi = document.getElementById("pin_input");
