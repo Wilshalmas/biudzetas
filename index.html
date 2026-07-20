@@ -117,7 +117,11 @@
 </style>
 </head>
 <body>
-<div class="app" id="app"></div>
+<div class="app" id="app"><div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;min-height:100dvh;gap:12px;">
+  <div style="width:32px;height:32px;border:3px solid rgba(237,234,224,0.15);border-top-color:#C9A227;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+  <div style="color:#8FA098;font-size:13px;">Kraunama…</div>
+</div></div>
+<style>@keyframes spin { to { transform: rotate(360deg); } }</style>
 
 <script>
 const ICONS = {
@@ -3893,6 +3897,21 @@ function submitPin(ev) {
 
 let lastRenderedTab = null;
 function render() {
+  try {
+    renderInner();
+  } catch (err) {
+    console.error(err);
+    const app = document.getElementById("app");
+    app.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;min-height:100dvh;gap:14px;padding:24px;text-align:center;">
+      <div style="font-size:36px;">⚠️</div>
+      <div style="font-size:16px;font-weight:600;color:#EDEAE0;">Kažkas nutiko</div>
+      <div style="font-size:13px;color:#8FA098;">Programėlė aptiko klaidą ir negalėjo tęsti. Tavo duomenys saugūs — jie nepaveikti.</div>
+      <button type="button" onclick="location.reload()" style="background:#C9A227;color:#1B2420;border:none;border-radius:10px;padding:10px 22px;font-size:14px;font-weight:600;margin-top:6px;">Įkelti iš naujo</button>
+      <div style="font-size:11px;color:#8FA098;margin-top:14px;max-width:320px;word-break:break-word;">Techninė informacija (nusiųsk šį tekstą, jei praneši apie klaidą):<br><span style="font-family:monospace;">${(err && err.message ? err.message : String(err)).replace(/[<>]/g,"")}</span></div>
+    </div>`;
+  }
+}
+function renderInner() {
   const app = document.getElementById("app");
   app.style.zoom = state.fontSize === "large" ? "1.15" : state.fontSize === "small" ? "0.9" : "1";
   if (state.tab !== lastRenderedTab) {
@@ -4009,6 +4028,17 @@ async function boot() {
   window.scrollTo(0, 0);
 }
 boot();
+
+let lastGlobalErrorAt = 0;
+function handleGlobalError(err) {
+  const now = Date.now();
+  if (now - lastGlobalErrorAt < 2000) return;
+  lastGlobalErrorAt = now;
+  console.error(err);
+  render();
+}
+window.addEventListener("error", (e) => handleGlobalError(e.error || e.message));
+window.addEventListener("unhandledrejection", (e) => handleGlobalError(e.reason));
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && state.appPin) {
